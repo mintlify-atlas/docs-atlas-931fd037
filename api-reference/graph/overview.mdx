@@ -149,7 +149,7 @@ children = [
 graph = Arcana.Graph.to_query_graph(graph_data, chunks)
 ```
 
-See [Arcana.Graph.build/2](/api-reference/graph#build) in `lib/arcana/graph.ex:150`
+See `lib/arcana/graph.ex:150` for implementation details.
 
 ### Searching Graphs
 
@@ -166,7 +166,7 @@ results = Arcana.Graph.fusion_search(graph, entities, vector_results,
 )
 ```
 
-See [Arcana.Graph.fusion_search/4](/api-reference/graph#fusion_search) in `lib/arcana/graph.ex:228`
+See [Graph Search](/api-reference/graph/search) for detailed documentation.
 
 ### Community Summaries
 
@@ -178,7 +178,7 @@ summaries = Arcana.Graph.community_summaries(graph, level: 0)
 summaries = Arcana.Graph.community_summaries(graph, entity_id: "entity_123")
 ```
 
-See [Arcana.Graph.community_summaries/2](/api-reference/graph#community_summaries) in `lib/arcana/graph.ex:249`
+See [Communities](/api-reference/graph/communities) for detailed documentation.
 
 ### Finding and Traversing
 

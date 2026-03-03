@@ -75,7 +75,8 @@
               "api-reference/arcana",
               "api-reference/ingest",
               "api-reference/search",
-              "api-reference/ask"
+              "api-reference/ask",
+              "api-reference/evaluation"
             ]
           },
           {

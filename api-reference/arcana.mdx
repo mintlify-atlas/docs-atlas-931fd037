@@ -251,6 +251,81 @@ IO.inspect(results)
 # ]
 ```
 
+### rewrite_query/2
+
+Rewrites a query using a provided rewriter function to improve retrieval.
+
+```elixir
+rewrite_query(query, opts \\ []) :: {:ok, rewritten_query} | {:error, term()}
+```
+
+Query rewriting can improve retrieval by:
+- Expanding abbreviations
+- Adding synonyms
+- Reformulating the query for better matching
+- Correcting typos
+
+<ParamField path="query" type="string" required>
+  The original query to rewrite
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  Rewrite options:
+  
+  <ParamField path="rewriter" type="function" required>
+    A function that takes a query and returns `{:ok, rewritten}` or `{:error, reason}`.
+    The function should have the signature: `(String.t()) -> {:ok, String.t()} | {:error, term()}`
+  </ParamField>
+</ParamField>
+
+**Example:**
+
+```elixir
+# Define a rewriter function
+rewriter = fn query ->
+  # Simple expansion example
+  expanded = query <> " programming language development"
+  {:ok, expanded}
+end
+
+# Rewrite the query
+{:ok, rewritten} = Arcana.rewrite_query(
+  "Elixir", 
+  rewriter: rewriter
+)
+
+IO.puts(rewritten)
+# => "Elixir programming language development"
+
+# Then use in search
+{:ok, results} = Arcana.search(rewritten, repo: MyApp.Repo)
+```
+
+**LLM-based rewriter:**
+
+```elixir
+rewriter = fn query ->
+  llm = Application.get_env(:my_app, :llm)
+  
+  prompt = """
+  Rewrite this search query to be more specific and include related terms.
+  Original: #{query}
+  Rewritten:
+  """
+  
+  case Arcana.LLM.complete(llm, prompt, [], []) do
+    {:ok, rewritten} -> {:ok, String.trim(rewritten)}
+    error -> error
+  end
+end
+
+{:ok, rewritten} = Arcana.rewrite_query("RAG", rewriter: rewriter)
+```
+
+<Note>
+  For automatic query rewriting in the Agent pipeline, use `Agent.rewrite/2` which provides built-in LLM-based rewriting.
+</Note>
+
 ### ask/2
 
 Ask questions using RAG (Retrieval Augmented Generation) with context from your knowledge base.

@@ -1,0 +1,337 @@
+---
+title: Arcana.Evaluation
+description: Retrieval evaluation for measuring search quality
+---
+
+# Arcana.Evaluation
+
+The `Arcana.Evaluation` module provides tools for measuring and improving retrieval quality using standard information retrieval metrics.
+
+## Overview
+
+Evaluation helps you:
+- Generate synthetic test cases from your document chunks
+- Measure retrieval performance (MRR, Recall, Precision, NDCG)
+- Compare different search modes and configurations
+- Track quality improvements over time
+
+## Main Functions
+
+### generate_test_cases/1
+
+Generates synthetic test cases from existing chunks using an LLM.
+
+```elixir
+{:ok, test_cases} = Arcana.Evaluation.generate_test_cases(
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini",
+  sample_size: 50
+)
+```
+
+<ParamField path="repo" type="module" required>
+  Your Ecto repo module
+</ParamField>
+
+<ParamField path="llm" type="string | function | module" required>
+  LLM for generating questions. Can be a model string, function, or module implementing `Arcana.LLM`
+</ParamField>
+
+<ParamField path="sample_size" type="integer" default="50">
+  Number of chunks to sample for test case generation
+</ParamField>
+
+<ParamField path="source_id" type="string">
+  Limit to chunks from a specific source
+</ParamField>
+
+<ParamField path="collection" type="string">
+  Limit to chunks from a specific collection
+</ParamField>
+
+<ParamField path="prompt" type="function">
+  Custom prompt template function `fn chunk_text -> prompt end`
+</ParamField>
+
+**Returns**: `{:ok, [%TestCase{}]}` or `{:error, reason}`
+
+### run/1
+
+Runs evaluation against existing test cases and returns metrics.
+
+```elixir
+{:ok, run} = Arcana.Evaluation.run(
+  repo: MyApp.Repo,
+  mode: :semantic
+)
+
+run.metrics
+# => %{
+#   recall_at_5: 0.84,
+#   precision_at_5: 0.68,
+#   mrr: 0.76,
+#   ndcg_at_5: 0.81
+# }
+```
+
+<ParamField path="repo" type="module" required>
+  Your Ecto repo module
+</ParamField>
+
+<ParamField path="mode" type="atom" default=":semantic">
+  Search mode: `:semantic`, `:fulltext`, or `:hybrid`
+</ParamField>
+
+<ParamField path="source_id" type="string">
+  Limit evaluation to specific source
+</ParamField>
+
+<ParamField path="collection" type="string">
+  Limit evaluation to specific collection
+</ParamField>
+
+<ParamField path="evaluate_answers" type="boolean" default="false">
+  Also evaluate answer quality (requires LLM)
+</ParamField>
+
+<ParamField path="llm" type="string | function | module">
+  LLM for answer evaluation (required when `evaluate_answers: true`)
+</ParamField>
+
+<ParamField path="k" type="integer" default="5">
+  Number of results to evaluate (for recall@k, precision@k, NDCG@k)
+</ParamField>
+
+**Returns**: `{:ok, %Run{}}` or `{:error, reason}`
+
+The returned `Run` struct contains:
+- `metrics`: Map of metric name to score
+- `test_case_count`: Number of test cases evaluated
+- `mode`: Search mode used
+- `inserted_at`: Timestamp
+
+## Test Case Management
+
+### list_test_cases/1
+
+Lists all test cases.
+
+```elixir
+{:ok, test_cases} = Arcana.Evaluation.list_test_cases(repo: MyApp.Repo)
+```
+
+<ParamField path="repo" type="module" required>
+  Your Ecto repo module
+</ParamField>
+
+<ParamField path="source_id" type="string">
+  Filter by source ID
+</ParamField>
+
+<ParamField path="collection" type="string">
+  Filter by collection
+</ParamField>
+
+### get_test_case/2
+
+Retrieves a specific test case by ID.
+
+```elixir
+{:ok, test_case} = Arcana.Evaluation.get_test_case(id, repo: MyApp.Repo)
+```
+
+### create_test_case/1
+
+Manually creates a test case.
+
+```elixir
+{:ok, test_case} = Arcana.Evaluation.create_test_case(
+  repo: MyApp.Repo,
+  question: "What is Elixir?",
+  expected_chunk_id: chunk_id,
+  source_id: "docs"
+)
+```
+
+<ParamField path="repo" type="module" required>
+  Your Ecto repo module
+</ParamField>
+
+<ParamField path="question" type="string" required>
+  The test question
+</ParamField>
+
+<ParamField path="expected_chunk_id" type="string" required>
+  UUID of the chunk that should be retrieved
+</ParamField>
+
+<ParamField path="source_id" type="string">
+  Source identifier
+</ParamField>
+
+<ParamField path="collection" type="string">
+  Collection name
+</ParamField>
+
+### delete_test_case/2
+
+Deletes a test case.
+
+```elixir
+:ok = Arcana.Evaluation.delete_test_case(id, repo: MyApp.Repo)
+```
+
+### count_test_cases/1
+
+Returns the total number of test cases.
+
+```elixir
+{:ok, count} = Arcana.Evaluation.count_test_cases(repo: MyApp.Repo)
+```
+
+## Run Management
+
+### list_runs/1
+
+Lists evaluation runs.
+
+```elixir
+{:ok, runs} = Arcana.Evaluation.list_runs(repo: MyApp.Repo)
+```
+
+<ParamField path="repo" type="module" required>
+  Your Ecto repo module
+</ParamField>
+
+<ParamField path="limit" type="integer" default="50">
+  Maximum number of runs to return
+</ParamField>
+
+### get_run/2
+
+Retrieves a specific evaluation run.
+
+```elixir
+{:ok, run} = Arcana.Evaluation.get_run(id, repo: MyApp.Repo)
+```
+
+### delete_run/2
+
+Deletes an evaluation run.
+
+```elixir
+:ok = Arcana.Evaluation.delete_run(id, repo: MyApp.Repo)
+```
+
+## Metrics
+
+Arcana.Evaluation provides standard information retrieval metrics:
+
+### Recall@k
+Percentage of relevant documents retrieved in top k results.
+
+### Precision@k
+Percentage of retrieved documents that are relevant in top k results.
+
+### MRR (Mean Reciprocal Rank)
+Average of reciprocal ranks of the first relevant document.
+
+### NDCG@k (Normalized Discounted Cumulative Gain)
+Measures ranking quality, giving more weight to relevant documents at higher positions.
+
+## Complete Example
+
+```elixir
+defmodule MyApp.Evaluation do
+  alias Arcana.Evaluation
+
+  def evaluate_retrieval do
+    repo = MyApp.Repo
+    llm = "openai:gpt-4o-mini"
+
+    # 1. Generate test cases
+    IO.puts("Generating test cases...")
+    {:ok, test_cases} = Evaluation.generate_test_cases(
+      repo: repo,
+      llm: llm,
+      sample_size: 100,
+      collection: "docs"
+    )
+    IO.puts("Generated #{length(test_cases)} test cases")
+
+    # 2. Evaluate semantic search
+    IO.puts("\nEvaluating semantic search...")
+    {:ok, semantic_run} = Evaluation.run(
+      repo: repo,
+      mode: :semantic,
+      collection: "docs"
+    )
+    print_metrics("Semantic", semantic_run.metrics)
+
+    # 3. Evaluate hybrid search
+    IO.puts("\nEvaluating hybrid search...")
+    {:ok, hybrid_run} = Evaluation.run(
+      repo: repo,
+      mode: :hybrid,
+      collection: "docs"
+    )
+    print_metrics("Hybrid", hybrid_run.metrics)
+
+    # 4. Compare results
+    compare_runs(semantic_run, hybrid_run)
+  end
+
+  defp print_metrics(label, metrics) do
+    IO.puts("#{label} Search Metrics:")
+    IO.puts("  Recall@5: #{Float.round(metrics.recall_at_5, 3)}")
+    IO.puts("  Precision@5: #{Float.round(metrics.precision_at_5, 3)}")
+    IO.puts("  MRR: #{Float.round(metrics.mrr, 3)}")
+    IO.puts("  NDCG@5: #{Float.round(metrics.ndcg_at_5, 3)}")
+  end
+
+  defp compare_runs(run1, run2) do
+    IO.puts("\nComparison:")
+    improvement = (run2.metrics.mrr - run1.metrics.mrr) / run1.metrics.mrr * 100
+    IO.puts("  MRR improvement: #{Float.round(improvement, 1)}%")
+  end
+end
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Generate Representative Test Cases">
+    - Sample from diverse documents and topics
+    - Include both easy and hard questions
+    - Aim for 50-200 test cases for reliable metrics
+    - Regenerate periodically as your content evolves
+  </Accordion>
+
+  <Accordion title="Run Regular Evaluations">
+    - Evaluate after configuration changes
+    - Compare different search modes
+    - Track metrics over time
+    - Test with different chunk sizes and overlap
+  </Accordion>
+
+  <Accordion title="Interpret Metrics Together">
+    - High recall, low precision: Too many irrelevant results
+    - Low recall, high precision: Missing relevant results
+    - High MRR: Relevant results ranked highly
+    - Use NDCG@k for ranking quality assessment
+  </Accordion>
+
+  <Accordion title="Optimize Based on Metrics">
+    - Recall@5 < 0.7: Increase search limit or adjust chunking
+    - Precision@5 < 0.6: Add re-ranking or adjust thresholds
+    - MRR < 0.6: Review embedding model or query rewriting
+    - Low NDCG@5: Improve ranking (hybrid search, re-ranking)
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [Evaluation Guide](/guides/evaluation) - Comprehensive evaluation guide
+- [Search Algorithms](/guides/search-algorithms) - Understanding search modes
+- [Re-ranking](/guides/reranking) - Improving result quality
+- [Telemetry](/guides/telemetry) - Monitoring search performance
