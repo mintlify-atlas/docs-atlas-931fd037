@@ -1,0 +1,620 @@
+---
+title: 'Embeddings'
+description: 'Understanding vector embeddings and how Arcana uses them for semantic search'
+icon: 'brain'
+---
+
+## What are Embeddings?
+
+Embeddings are **numerical representations of text** that capture semantic meaning. They transform words, sentences, or documents into vectors (lists of numbers) in a high-dimensional space where similar meanings are positioned close together.
+
+### Why Embeddings Matter for RAG
+
+<Tabs>
+  <Tab title="Semantic Understanding">
+    Traditional keyword search matches exact words. Embeddings understand meaning:
+    
+    ```text
+    Query: "ML algorithms"
+    
+    Keyword match:
+    ❌ "machine learning models"  (no match - different words)
+    ✅ "ML algorithms overview"    (exact match)
+    
+    Embedding match:
+    ✅ "machine learning models"  (0.87 similarity - same concept)
+    ✅ "ML algorithms overview"    (0.92 similarity)
+    ✅ "neural networks"           (0.78 similarity - related)
+    ```
+  </Tab>
+  
+  <Tab title="Cross-lingual">
+    Embeddings can match concepts across languages:
+    
+    ```text
+    Query (English): "artificial intelligence"
+    
+    Results:
+    ✅ "intelligence artificielle" (French - 0.85 similarity)
+    ✅ "künstliche Intelligenz"    (German - 0.83 similarity)
+    ```
+    
+    <Note>
+    Requires multilingual models like `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+    </Note>
+  </Tab>
+  
+  <Tab title="Synonym Awareness">
+    Embeddings automatically handle synonyms:
+    
+    ```text
+    Document: "The automobile was fast"
+    Query: "car speed"
+    
+    Similarity: 0.82 ✅
+    
+    # "automobile" ≈ "car", "fast" ≈ "speed"
+    ```
+  </Tab>
+</Tabs>
+
+## How Vector Similarity Search Works
+
+Arcana uses **cosine similarity** to find relevant chunks:
+
+```elixir
+# 1. Embed the query
+query = "What is Elixir?"
+{:ok, query_embedding} = Embedder.embed(embedder, query, intent: :query)
+# => [0.23, -0.45, 0.67, ...] (384 dimensions for bge-small)
+
+# 2. Compare with stored chunk embeddings using cosine similarity
+# Cosine similarity measures the angle between vectors (0 to 1)
+#   1.0 = identical meaning
+#   0.8+ = highly relevant
+#   0.5-0.8 = somewhat relevant
+#   under 0.5 = not relevant
+
+# 3. PostgreSQL pgvector computes similarity efficiently
+results = VectorStore.search(collection, query_embedding, limit: 5)
+# Returns chunks sorted by similarity score
+```
+
+### Cosine Similarity Formula
+
+Given two vectors **A** and **B**:
+
+```
+similarity = (A · B) / (||A|| × ||B||)
+
+Where:
+- A · B = dot product (sum of element-wise products)
+- ||A|| = magnitude of vector A
+- ||B|| = magnitude of vector B
+```
+
+**PostgreSQL implementation** (from `lib/arcana/vector_store/pgvector.ex:109`):
+
+```sql
+SELECT 
+  id, text,
+  1 - (embedding <=> query_embedding) AS score
+FROM arcana_chunks
+ORDER BY embedding <=> query_embedding
+LIMIT 10
+```
+
+<Note>
+The `<=>` operator computes cosine distance. Arcana converts it to similarity with `1 - distance`.
+</Note>
+
+## Embedding Providers
+
+Arcana supports multiple embedding providers with a pluggable architecture:
+
+<Tabs>
+  <Tab title="Local (Bumblebee)">
+    **Default**: Run models locally with no API costs.
+    
+    ```elixir
+    # config/config.exs
+    config :arcana, embedder: :local
+    config :arcana, embedder: {:local, model: "BAAI/bge-large-en-v1.5"}
+    ```
+    
+    **Pros:**
+    - No API costs
+    - Data privacy (no external calls)
+    - No rate limits
+    
+    **Cons:**
+    - Requires CPU/GPU resources
+    - Slower initial model download
+    - Needs Nx backend (EXLA, EMLX, or Torchx)
+    
+    **Popular models** (from `lib/arcana/embedder/local.ex:33-48`):
+    
+    | Model | Dimensions | Size | Best For |
+    |-------|------------|------|----------|
+    | `BAAI/bge-small-en-v1.5` | 384 | ~133 MB | **Default** - balanced speed/quality |
+    | `BAAI/bge-base-en-v1.5` | 768 | ~438 MB | Better quality, slower |
+    | `BAAI/bge-large-en-v1.5` | 1024 | ~1.3 GB | Best quality, slowest |
+    | `intfloat/e5-small-v2` | 384 | ~133 MB | Requires query/passage prefixes |
+    | `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90 MB | Lightweight, fast |
+    
+    **Setup:**
+    
+    ```elixir
+    # Add to supervision tree
+    children = [
+      MyApp.Repo,
+      {Arcana.Embedder.Local, model: "BAAI/bge-small-en-v1.5"}
+    ]
+    
+    # Configure Nx backend (required)
+    config :nx,
+      default_backend: EXLA.Backend,
+      default_defn_options: [compiler: EXLA]
+    ```
+  </Tab>
+  
+  <Tab title="OpenAI">
+    Use OpenAI's embedding API via Req.LLM.
+    
+    ```elixir
+    # config/config.exs
+    config :arcana, embedder: :openai
+    config :arcana, embedder: {:openai, model: "text-embedding-3-large"}
+    ```
+    
+    **Pros:**
+    - No local resources needed
+    - Fast inference
+    - State-of-the-art quality
+    
+    **Cons:**
+    - API costs (~$0.13 per 1M tokens for text-embedding-3-small)
+    - Rate limits
+    - Data sent to OpenAI
+    
+    **Models** (from `lib/arcana/embedder/openai.ex:54-62`):
+    
+    | Model | Dimensions | Cost (per 1M tokens) |
+    |-------|------------|----------------------|
+    | `text-embedding-3-small` | 1536 | $0.02 |
+    | `text-embedding-3-large` | 3072 | $0.13 |
+    | `text-embedding-ada-002` | 1536 | $0.10 |
+    
+    **Setup:**
+    
+    ```elixir
+    # Add to mix.exs
+    {:req_llm, "~> 0.3"}
+    
+    # Set environment variable
+    export OPENAI_API_KEY="sk-..."
+    ```
+  </Tab>
+  
+  <Tab title="Custom Provider">
+    Implement your own embedding provider (Cohere, Voyage AI, etc.):
+    
+    ```elixir
+    defmodule MyApp.CohereEmbedder do
+      @behaviour Arcana.Embedder
+
+      @impl true
+      def embed(text, opts) do
+        api_key = opts[:api_key] || System.get_env("COHERE_API_KEY")
+        
+        # Call Cohere API
+        body = Jason.encode!(%{
+          texts: [text],
+          model: "embed-english-v3.0",
+          input_type: "search_document"
+        })
+        
+        case Req.post(
+          "https://api.cohere.ai/v1/embed",
+          headers: [{"Authorization", "Bearer #{api_key}"}],
+          body: body
+        ) do
+          {:ok, %{body: %{"embeddings" => [embedding]}}} ->
+            {:ok, embedding}
+          {:error, reason} ->
+            {:error, reason}
+        end
+      end
+
+      @impl true
+      def dimensions(_opts), do: 1024
+    end
+    
+    # config/config.exs
+    config :arcana, embedder: {MyApp.CohereEmbedder, api_key: "..."}
+    ```
+    
+    **Required callbacks** (from `lib/arcana/embedder.ex:56-77`):
+    - `embed/2` - Embed single text → `{:ok, [float()]}` or `{:error, term()}`
+    - `dimensions/1` - Return embedding dimension count
+    - `embed_batch/2` (optional) - Batch embedding for efficiency
+  </Tab>
+</Tabs>
+
+## E5 Models and Query/Passage Prefixes
+
+E5 models from Microsoft require **special prefixes** to distinguish search queries from document content:
+
+```elixir
+# Query embedding (what the user searches for)
+Embedder.embed(embedder, "What is Elixir?", intent: :query)
+# Behind the scenes: "query: What is Elixir?" (lib/arcana/embedder/local.ex:141-150)
+
+# Document embedding (content being indexed)
+Embedder.embed(embedder, "Elixir is a functional language...", intent: :document)
+# Behind the scenes: "passage: Elixir is a functional language..."
+```
+
+### Why Prefixes Matter
+
+E5 models were trained with these prefixes to differentiate:
+- **Queries** = short, question-like text
+- **Passages** = longer document chunks
+
+Using the wrong prefix significantly reduces retrieval quality.
+
+**Automatic prefix handling** (from `lib/arcana/embedder/local.ex:141-151`):
+
+```elixir
+def prepare_text(text, model, intent) do
+  if MapSet.member?(@e5_models, model) do
+    case intent do
+      :query -> "query: #{text}"
+      :document -> "passage: #{text}"
+      nil -> "passage: #{text}"  # default to passage
+    end
+  else
+    text  # Other models don't need prefixes
+  end
+end
+```
+
+<Warning>
+**Only E5 models** (`intfloat/e5-*`) require prefixes. BGE, GTE, and Sentence Transformers models do **not** use them.
+</Warning>
+
+## Embedding Dimensions Comparison
+
+**Dimensions affect**:
+- **Storage size**: More dimensions = larger database
+- **Search speed**: More dimensions = slower cosine similarity
+- **Quality**: Generally, more dimensions = better semantic understanding (with diminishing returns)
+
+### Storage Calculator
+
+```elixir
+# Each dimension = 4 bytes (float32)
+# Example: 10,000 chunks with bge-small (384 dims)
+
+chunk_count = 10_000
+dimensions = 384
+bytes_per_dim = 4
+
+total_mb = (chunk_count * dimensions * bytes_per_dim) / 1_024 / 1_024
+# => ~14.6 MB for embeddings alone
+
+# With text-embedding-3-large (3072 dims):
+dimensions = 3_072
+total_mb = (chunk_count * dimensions * bytes_per_dim) / 1_024 / 1_024
+# => ~117 MB for embeddings
+```
+
+### Dimension Trade-offs
+
+<CardGroup cols={2}>
+  <Card title="Low Dimensions (384)" icon="gauge-low">
+    **Models**: bge-small, e5-small, MiniLM
+    
+    **Pros**:
+    - Fast search (under 10ms for 100K chunks)
+    - Small storage footprint
+    - Quick embedding generation
+    
+    **Cons**:
+    - Slightly lower semantic precision
+    - May miss subtle relationships
+    
+    **Best for**: High-volume applications, real-time search
+  </Card>
+  
+  <Card title="Medium Dimensions (768)" icon="gauge-simple">
+    **Models**: bge-base, e5-base
+    
+    **Pros**:
+    - Balanced quality/speed
+    - Good semantic understanding
+    
+    **Cons**:
+    - 2x storage vs 384 dims
+    - Moderate speed impact
+    
+    **Best for**: Most production use cases
+  </Card>
+  
+  <Card title="High Dimensions (1024-1536)" icon="gauge-high">
+    **Models**: bge-large, text-embedding-3-small
+    
+    **Pros**:
+    - Excellent semantic precision
+    - Better handling of nuanced queries
+    
+    **Cons**:
+    - 3-4x storage vs 384 dims
+    - Slower search on large datasets
+    
+    **Best for**: Research, legal, medical domains
+  </Card>
+  
+  <Card title="Very High Dimensions (3072)" icon="gauge">
+    **Models**: text-embedding-3-large
+    
+    **Pros**:
+    - State-of-the-art quality
+    - Best for complex domains
+    
+    **Cons**:
+    - 8x storage vs 384 dims
+    - Noticeably slower search
+    - Higher API costs
+    
+    **Best for**: Critical applications where quality > cost
+  </Card>
+</CardGroup>
+
+## How Embeddings Work with Vector Stores
+
+**Ingestion flow** (from `lib/arcana/ingest.ex:125-156`):
+
+```elixir
+# 1. Text is chunked
+chunks = Chunker.chunk(chunker_config, text, opts)
+# => [%{text: "...", chunk_index: 0, token_count: 342}, ...]
+
+# 2. Each chunk is embedded
+Enum.reduce_while(chunks, {:ok, []}, fn chunk, {:ok, acc} ->
+  case Embedder.embed(emb, chunk.text, intent: :document) do
+    {:ok, embedding} ->
+      # 3. Embedding stored with chunk
+      chunk_record =
+        %Chunk{}
+        |> Chunk.changeset(%{
+          text: chunk.text,
+          embedding: embedding,  # [0.23, -0.45, 0.67, ...]
+          chunk_index: chunk.chunk_index,
+          document_id: document.id
+        })
+        |> repo.insert!()
+      
+      {:cont, {:ok, [chunk_record | acc]}}
+      
+    {:error, reason} ->
+      {:halt, {:error, reason}}
+  end
+end)
+```
+
+**Search flow** (from `lib/arcana/search.ex:228-246`):
+
+```elixir
+# 1. Query is embedded
+case Embedder.embed(embedder, query, intent: :query) do
+  {:ok, query_embedding} ->
+    # 2. pgvector finds similar chunks
+    results = VectorStore.search(collection, query_embedding, opts)
+    
+    # SQL behind the scenes (lib/arcana/vector_store/pgvector.ex:97-114):
+    # SELECT id, text,
+    #   1 - (embedding <=> $1) AS score
+    # FROM arcana_chunks
+    # WHERE 1 - (embedding <=> $1) > $2  -- threshold
+    # ORDER BY embedding <=> $1
+    # LIMIT $3
+    
+    {:ok, transform_results(results)}
+end
+```
+
+## Embedding Real Examples
+
+<Tabs>
+  <Tab title="Local Bumblebee">
+    ```elixir
+    # Start the serving (in supervision tree)
+    children = [
+      {Arcana.Embedder.Local, model: "BAAI/bge-small-en-v1.5"}
+    ]
+
+    # Embed a query
+    embedder = {:local, model: "BAAI/bge-small-en-v1.5"}
+    {:ok, embedding} = Arcana.Embedder.embed(
+      embedder, 
+      "How does Phoenix LiveView work?",
+      intent: :query
+    )
+
+    # Result:
+    # {:ok, [0.234, -0.456, 0.678, ...]} (384 floats)
+    length(embedding)  # => 384
+
+    # Behind the scenes (lib/arcana/embedder/local.ex:99-115):
+    # 1. Text sent to Nx.Serving (Bumblebee model)
+    # 2. Model computes embedding on EXLA/EMLX backend
+    # 3. Nx tensor converted to Elixir list
+    # 4. Telemetry event emitted
+    ```
+  </Tab>
+  
+  <Tab title="OpenAI">
+    ```elixir
+    # Set API key
+    System.put_env("OPENAI_API_KEY", "sk-...")
+
+    # Embed with OpenAI
+    embedder = {:openai, model: "text-embedding-3-small"}
+    {:ok, embedding} = Arcana.Embedder.embed(
+      embedder,
+      "Explain vector databases",
+      intent: :query
+    )
+
+    # Result:
+    # {:ok, [0.123, -0.234, 0.345, ...]} (1536 floats)
+    length(embedding)  # => 1536
+
+    # Behind the scenes (lib/arcana/embedder/openai.ex:40-50):
+    # 1. Call ReqLLM.embed("openai:text-embedding-3-small", text)
+    # 2. HTTP POST to OpenAI API
+    # 3. Parse response JSON
+    # 4. Return embedding vector
+    ```
+  </Tab>
+  
+  <Tab title="Batch Embedding">
+    ```elixir
+    # Embed multiple texts efficiently
+    texts = [
+      "First document chunk",
+      "Second document chunk",
+      "Third document chunk"
+    ]
+
+    {:ok, embeddings} = Arcana.Embedder.embed_batch(embedder, texts)
+
+    # Result:
+    # {:ok, [
+    #   [0.12, -0.34, ...],  # 384 floats
+    #   [0.23, -0.45, ...],  # 384 floats
+    #   [0.34, -0.56, ...]   # 384 floats
+    # ]}
+
+    # Note: Falls back to sequential embedding if provider
+    # doesn't implement embed_batch/2 (lib/arcana/embedder.ex:113-126)
+    ```
+  </Tab>
+</Tabs>
+
+## Choosing the Right Embedding Model
+
+<Steps>
+  <Step title="Consider Your Dataset Size">
+    **Small (under 10K chunks)**: Use any model, even large ones
+    
+    **Medium (10K-100K chunks)**: Use 384-768 dimensions
+    
+    **Large (>100K chunks)**: Prefer 384 dimensions for speed
+  </Step>
+  
+  <Step title="Evaluate Quality Requirements">
+    **General knowledge base**: bge-small or MiniLM (384 dims)
+    
+    **Technical/domain-specific**: bge-base or e5-base (768 dims)
+    
+    **Legal/medical/research**: bge-large or OpenAI large (1024-3072 dims)
+  </Step>
+  
+  <Step title="Factor in Costs">
+    **Budget-constrained**: Use local models (no API costs)
+    
+    **Scale & convenience**: OpenAI (pay per usage)
+    
+    **Hybrid**: Local for documents, OpenAI for queries (rare embeddings)
+  </Step>
+  
+  <Step title="Test with Your Data">
+    ```elixir
+    # Benchmark different models
+    models = [
+      {:local, model: "BAAI/bge-small-en-v1.5"},
+      {:local, model: "BAAI/bge-base-en-v1.5"},
+      {:openai, model: "text-embedding-3-small"}
+    ]
+
+    test_queries = ["query 1", "query 2", "query 3"]
+
+    Enum.each(models, fn embedder ->
+      # Ingest test data
+      # Run test queries
+      # Measure precision/recall
+      # Compare results
+    end)
+    ```
+    
+    See [Evaluation Guide](/guides/evaluation) for metrics and testing.
+  </Step>
+</Steps>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Intent Parameter" icon="bullseye">
+    Always specify `:intent` for E5 models:
+    
+    ```elixir
+    # For queries
+    embed(embedder, query, intent: :query)
+    
+    # For documents
+    embed(embedder, chunk, intent: :document)
+    ```
+  </Card>
+  
+  <Card title="Cache Embeddings" icon="database">
+    Never re-embed the same text. Arcana stores embeddings automatically:
+    
+    ```elixir
+    # Embeddings stored in arcana_chunks table
+    # Only query text needs fresh embedding
+    ```
+  </Card>
+  
+  <Card title="Monitor Dimensions" icon="ruler">
+    Ensure dimensions match across ingestion and search:
+    
+    ```elixir
+    # Migration checks dimensions
+    Embedder.dimensions(embedder)
+    # Must match for all chunks in collection
+    ```
+  </Card>
+  
+  <Card title="Handle Errors" icon="shield-check">
+    Embedding can fail (API limits, model load):
+    
+    ```elixir
+    case Embedder.embed(embedder, text) do
+      {:ok, embedding} -> # proceed
+      {:error, reason} -> # retry or log
+    end
+    ```
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Search Modes" icon="magnifying-glass" href="/core-concepts/search-modes">
+    Learn how to search with embeddings using semantic, full-text, and hybrid modes
+  </Card>
+  
+  <Card title="Chunking Strategies" icon="scissors" href="/core-concepts/chunking">
+    Optimize how documents are split before embedding
+  </Card>
+  
+  <Card title="Evaluation" icon="chart-line" href="/guides/evaluation">
+    Measure and improve embedding quality with metrics
+  </Card>
+  
+  <Card title="Getting Started" icon="rocket" href="/getting-started/installation">
+    Set up your first embedding-powered application
+  </Card>
+</CardGroup>

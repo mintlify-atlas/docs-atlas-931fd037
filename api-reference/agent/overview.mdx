@@ -1,0 +1,149 @@
+---
+title: Agent Pipeline Overview
+description: Pipeline-based agentic RAG architecture for Arcana
+---
+
+## Introduction
+
+Arcana's Agent module provides a composable, pipeline-based approach to agentic RAG (Retrieval-Augmented Generation). Build sophisticated question-answering systems by chaining modular steps together.
+
+## Basic Pipeline
+
+```elixir
+Arcana.Agent.new("What is Elixir?")
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer()
+```
+
+## Architecture
+
+### Context Flow
+
+The `Arcana.Agent.Context` struct flows through the pipeline, accumulating results at each step:
+
+```elixir
+%Arcana.Agent.Context{
+  question: "original question",
+  rewritten_query: nil,      # Set by rewrite/2
+  expanded_query: nil,       # Set by expand/2
+  sub_questions: nil,        # Set by decompose/2
+  collections: nil,          # Set by select/2
+  skip_retrieval: false,     # Set by gate/2
+  results: [],               # Set by search/2
+  answer: nil,               # Set by answer/2
+  # ... configuration and metadata
+}
+```
+
+### Pipeline Steps
+
+Each step transforms the context and passes it forward:
+
+1. **[gate/2](/api-reference/agent/gate)** - Decide if retrieval is needed
+2. **[rewrite/2](/api-reference/agent/rewrite)** - Clean conversational input
+3. **[select/2](/api-reference/agent/select)** - Choose which collections to search
+4. **[expand/2](/api-reference/agent/expand)** - Add synonyms and related terms
+5. **[decompose/2](/api-reference/agent/decompose)** - Break complex questions into sub-questions
+6. **[search/2](/api-reference/agent/search)** - Execute retrieval
+7. **[reason/2](/api-reference/agent/reason)** - Multi-hop reasoning with additional searches
+8. **[rerank/2](/api-reference/agent/rerank)** - Re-score and re-order results
+9. **[answer/2](/api-reference/agent/answer)** - Generate final answer
+
+## Complete Pipeline Example
+
+```elixir
+# Advanced pipeline with all steps
+ctx =
+  Arcana.Agent.new("How do Elixir processes communicate?")
+  |> Arcana.Agent.gate()                          # Skip retrieval for general knowledge?
+  |> Arcana.Agent.rewrite()                       # Clean input
+  |> Arcana.Agent.select(collections: ["docs", "guides", "api"])
+  |> Arcana.Agent.expand()                        # Add related terms
+  |> Arcana.Agent.decompose()                     # Break into sub-questions
+  |> Arcana.Agent.search()                        # Execute searches
+  |> Arcana.Agent.reason(max_iterations: 2)       # Multi-hop if needed
+  |> Arcana.Agent.rerank(threshold: 7)            # Re-score results
+  |> Arcana.Agent.answer()
+
+ctx.answer
+# => "Elixir processes communicate through message passing..."
+```
+
+## Configuration
+
+Set defaults in your application config:
+
+```elixir
+config :arcana,
+  repo: MyApp.Repo,
+  llm: &MyApp.LLM.complete/1
+```
+
+This avoids passing `:repo` and `:llm` to every pipeline.
+
+## Query Transformation Chain
+
+Queries are transformed through the pipeline in this priority order:
+
+1. `expanded_query` (from expand/2) - highest priority
+2. `rewritten_query` (from rewrite/2)
+3. `question` (original) - fallback
+
+Each transformation step uses the effective query from previous steps.
+
+## Error Handling
+
+If any step sets `ctx.error`, subsequent steps are skipped:
+
+```elixir
+ctx
+|> Arcana.Agent.search()  # Sets error on failure
+|> Arcana.Agent.answer()  # Skipped if error is set
+
+if ctx.error do
+  Logger.error("Pipeline failed: #{ctx.error}")
+else
+  render_answer(ctx.answer)
+end
+```
+
+## Telemetry Events
+
+Every step emits telemetry events for observability:
+
+- `[:arcana, :agent, :gate]`
+- `[:arcana, :agent, :rewrite]`
+- `[:arcana, :agent, :select]`
+- `[:arcana, :agent, :expand]`
+- `[:arcana, :agent, :decompose]`
+- `[:arcana, :agent, :search]`
+- `[:arcana, :agent, :reason]`
+- `[:arcana, :agent, :rerank]`
+- `[:arcana, :agent, :answer]`
+- `[:arcana, :agent, :self_correct]`
+
+```elixir
+:telemetry.attach(
+  "my-handler",
+  [:arcana, :agent, :search],
+  &MyApp.Telemetry.handle_event/4,
+  nil
+)
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="gate/2" icon="door-open" href="/api-reference/agent/gate">
+    Decide if retrieval is needed
+  </Card>
+  <Card title="rewrite/2" icon="pen" href="/api-reference/agent/rewrite">
+    Clean conversational input
+  </Card>
+  <Card title="select/2" icon="filter" href="/api-reference/agent/select">
+    Choose collections to search
+  </Card>
+  <Card title="search/2" icon="magnifying-glass" href="/api-reference/agent/search">
+    Execute retrieval
+  </Card>
+</CardGroup>

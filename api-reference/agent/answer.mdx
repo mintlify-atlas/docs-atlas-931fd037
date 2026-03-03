@@ -1,0 +1,444 @@
+---
+title: Agent.answer/2
+description: Generate the final answer from search results
+---
+
+## Function Signature
+
+```elixir
+answer(ctx, opts \\ [])
+```
+
+Generates the final answer from search results using the LLM.
+
+## Purpose
+
+Collects all chunks from results, deduplicates by ID, and prompts the LLM to generate an answer based on the context.
+
+Handles both with-context answers (normal RAG) and no-context answers (when `skip_retrieval: true` from `gate/2`).
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()">
+  Options for the answer step
+</ParamField>
+
+### Options
+
+<ParamField path="answerer" type="module | function">
+  Custom answerer module or function (default: `Arcana.Agent.Answerer.LLM`)
+  
+  - **Module**: Must implement `answer/3` callback
+  - **Function**: Signature `fn question, chunks, opts -> {:ok, answer} | {:error, reason} end`
+</ParamField>
+
+<ParamField path="prompt" type="function">
+  Custom prompt function `fn question, chunks -> prompt_string end`
+  
+  Only used by the default LLM answerer.
+</ParamField>
+
+<ParamField path="llm" type="function">
+  Override the LLM function for this step
+</ParamField>
+
+<ParamField path="self_correct" type="boolean">
+  Enable self-correcting answers (default: false)
+  
+  If true, the LLM evaluates the answer and corrects it if not well-grounded in context.
+</ParamField>
+
+<ParamField path="max_corrections" type="integer">
+  Max correction attempts (default: 2)
+  
+  Only used when `self_correct: true`.
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="answer" type="string">
+  The generated answer
+</ResponseField>
+
+<ResponseField name="context_used" type="list(map)">
+  The chunks that were used to generate the answer (deduplicated)
+</ResponseField>
+
+<ResponseField name="correction_count" type="integer">
+  Number of self-corrections performed (0 if self_correct is false)
+</ResponseField>
+
+<ResponseField name="corrections" type="list(tuple)">
+  List of `{previous_answer, feedback}` tuples from correction iterations
+</ResponseField>
+
+<ResponseField name="error" type="term">
+  Set if answer generation fails
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer()
+
+ctx.answer
+# => "Elixir is a functional, concurrent programming language..."
+
+ctx.context_used
+# => [%{id: 1, text: "...", score: 0.89}, ...]
+```
+
+### With Self-Correction
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer(self_correct: true, max_corrections: 3)
+
+ctx.answer
+# => "Based on the documentation, GenServer is..."
+
+ctx.correction_count
+# => 1
+
+ctx.corrections
+# => [
+#   {"GenServer is probably...", "Answer contains speculation, stick to documentation"}
+# ]
+```
+
+### Complete Pipeline
+
+```elixir
+ctx = Arcana.Agent.new("What is Elixir?")
+|> Arcana.Agent.gate()
+|> Arcana.Agent.search()
+|> Arcana.Agent.rerank()
+|> Arcana.Agent.answer()
+
+IO.puts(ctx.answer)
+```
+
+### No-Context Answer (Skip Retrieval)
+
+```elixir
+ctx = Arcana.Agent.new("What is 2 + 2?")
+|> Arcana.Agent.gate()     # Sets skip_retrieval: true
+|> Arcana.Agent.search()   # Returns empty results
+|> Arcana.Agent.answer()   # Answers from general knowledge
+
+ctx.skip_retrieval
+# => true
+
+ctx.context_used
+# => []
+
+ctx.answer
+# => "2 + 2 equals 4."
+```
+
+### Custom Answerer Module
+
+```elixir
+defmodule MyApp.TemplateAnswerer do
+  @behaviour Arcana.Agent.Answerer
+
+  @impl true
+  def answer(question, chunks, opts) do
+    skip_retrieval = Keyword.get(opts, :skip_retrieval, false)
+
+    answer =
+      if skip_retrieval do
+        general_knowledge_answer(question)
+      else
+        template_based_answer(question, chunks)
+      end
+
+    {:ok, answer}
+  end
+
+  defp template_based_answer(question, chunks) do
+    context = Enum.map_join(chunks, "\n", & &1.text)
+    """
+    Based on our documentation:
+
+    #{context}
+
+    To answer your question "#{question}":
+    #{synthesize_answer(question, chunks)}
+    """
+  end
+
+  defp general_knowledge_answer(question) do
+    "This is a general knowledge question: #{question}"
+  end
+end
+
+# Usage
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer(answerer: MyApp.TemplateAnswerer)
+```
+
+### Inline Answerer Function
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer(
+  answerer: fn question, chunks, opts ->
+    llm = Keyword.fetch!(opts, :llm)
+    
+    # Simple prompt
+    context = Enum.map_join(chunks, "\n\n", & &1.text)
+    prompt = "Q: #{question}\n\nContext:\n#{context}\n\nA:"
+    
+    Arcana.LLM.complete(llm, prompt, [], [])
+  end
+)
+```
+
+### Streaming Answer
+
+```elixir
+defmodule MyApp.StreamingAnswerer do
+  @behaviour Arcana.Agent.Answerer
+
+  @impl true
+  def answer(question, chunks, opts) do
+    callback = Keyword.get(opts, :stream_callback)
+    llm = Keyword.fetch!(opts, :llm)
+    
+    context = Enum.map_join(chunks, "\n\n", & &1.text)
+    prompt = build_prompt(question, context)
+    
+    # Stream tokens to callback
+    full_answer =
+      llm
+      |> stream_completion(prompt)
+      |> Enum.reduce("", fn token, acc ->
+        if callback, do: callback.(token)
+        acc <> token
+      end)
+    
+    {:ok, full_answer}
+  end
+end
+
+# Usage
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer(
+  answerer: MyApp.StreamingAnswerer,
+  stream_callback: fn token -> IO.write(token) end
+)
+```
+
+## Self-Correction Flow
+
+When `self_correct: true`:
+
+1. Generate initial answer
+2. Ask LLM: "Is this answer well-grounded in the context?"
+3. If yes → Done
+4. If no → Get feedback and regenerate
+5. Repeat until grounded or max_corrections reached
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer(self_correct: true, max_corrections: 2)
+
+# Iteration 1:
+# Answer: "GenServer probably handles state..."
+# Eval: Not grounded - contains speculation
+# Feedback: "Stick to documentation, avoid 'probably'"
+
+# Iteration 2:
+# Answer: "According to the docs, GenServer handles state..."
+# Eval: Well-grounded
+# Done
+
+ctx.correction_count
+# => 1
+```
+
+## Evaluation Prompt
+
+For self-correction, the LLM evaluates answers with:
+
+```elixir
+"""
+Evaluate if the following answer is well-grounded in the provided context.
+
+Question: "#{question}"
+
+Context:
+#{context}
+
+Answer to evaluate:
+#{answer}
+
+Respond with JSON:
+- If the answer is well-grounded and accurate: {"grounded": true}
+- If the answer needs improvement: {"grounded": false, "feedback": "specific feedback on what to improve"}
+
+Only mark as not grounded if there are clear issues like:
+- Claims not supported by the context
+- Missing key information from the context
+- Factual errors
+
+JSON response:
+"""
+```
+
+## Chunk Deduplication
+
+Chunks are deduplicated by ID before answer generation:
+
+```elixir
+# If search/decompose/reason created duplicate chunks
+ctx.results = [
+  %{chunks: [%{id: 1, text: "..."}, %{id: 2, text: "..."}]},
+  %{chunks: [%{id: 2, text: "..."}, %{id: 3, text: "..."}]}  # id:2 duplicate
+]
+
+# Deduplication
+ctx.context_used
+# => [%{id: 1, ...}, %{id: 2, ...}, %{id: 3, ...}]  # Only unique chunks
+```
+
+## Custom Answerer Behaviour
+
+```elixir
+defmodule Arcana.Agent.Answerer do
+  @callback answer(
+              question :: String.t(),
+              chunks :: [map()],
+              opts :: Keyword.t()
+            ) ::
+              {:ok, String.t()} | {:error, term()}
+end
+```
+
+Answerer options include:
+- `llm` - The LLM function
+- `skip_retrieval` - Whether this is a no-context answer
+- Any custom options passed to `answer/2`
+
+## Telemetry Events
+
+Emits `[:arcana, :agent, :answer]`:
+
+```elixir
+# Start metadata
+%{
+  question: ctx.question,
+  answerer: Arcana.Agent.Answerer.LLM
+}
+
+# Stop metadata
+%{
+  context_chunk_count: 5,
+  correction_count: 1,
+  success: true
+}
+```
+
+Also emits `[:arcana, :agent, :self_correct]` for each correction attempt:
+
+```elixir
+# Start metadata
+%{attempt: 1}
+
+# Stop metadata
+%{
+  result: :corrected,  # or :accepted, :error, :eval_failed
+  attempt: 1
+}
+```
+
+## Error Handling
+
+If answer generation fails, sets `ctx.error`:
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer()
+
+if ctx.error do
+  Logger.error("Answer failed: #{ctx.error}")
+  {:error, ctx.error}
+else
+  {:ok, ctx.answer}
+end
+```
+
+## When to Use Self-Correction
+
+Use `self_correct: true` when:
+
+- Answer quality is critical
+- You want to reduce hallucinations
+- Context might be ambiguous
+- LLM tends to speculate beyond context
+
+**Costs:**
+- 2-3× more LLM calls (eval + regeneration)
+- Increased latency
+- Higher token usage
+
+## Best Practices
+
+1. **Use rerank first** - Better chunks = better answers
+2. **Monitor context_used** - Ensure relevant chunks are used
+3. **Tune prompts** - Custom prompts for domain-specific answers
+4. **Handle errors** - Check `ctx.error` before using answer
+5. **Consider streaming** - For better UX on long answers
+6. **Use self-correct selectively** - Only when quality is critical
+
+## Common Patterns
+
+### Minimal Pipeline
+
+```elixir
+Agent.new("question")
+|> Agent.search()
+|> Agent.answer()
+```
+
+### Quality-Focused Pipeline
+
+```elixir
+Agent.new("question")
+|> Agent.search()
+|> Agent.reason(max_iterations: 2)
+|> Agent.rerank(threshold: 8)
+|> Agent.answer(self_correct: true)
+```
+
+### Speed-Focused Pipeline
+
+```elixir
+Agent.new("question")
+|> Agent.gate()  # Skip retrieval if possible
+|> Agent.search(collection: "fast_index")
+|> Agent.answer()  # No rerank, no self-correct
+```
+
+## See Also
+
+- [search/2](/api-reference/agent/search) - Retrieval
+- [rerank/2](/api-reference/agent/rerank) - Improve chunk quality
+- [reason/2](/api-reference/agent/reason) - Multi-hop for comprehensive results
+- [gate/2](/api-reference/agent/gate) - Handle no-context answers
+- [Overview](/api-reference/agent/overview) - Complete pipeline guide

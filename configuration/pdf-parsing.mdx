@@ -1,0 +1,649 @@
+---
+title: PDF Parsing Configuration
+description: Configure PDF parsers for document ingestion in Arcana
+---
+
+Arcana supports PDF document ingestion with pluggable parsers. The default uses Poppler's `pdftotext` command-line tool.
+
+## Quick Start
+
+```elixir
+# config/config.exs
+
+# Default: Poppler's pdftotext
+config :arcana, pdf_parser: :poppler
+
+# With options
+config :arcana, pdf_parser: {:poppler, layout: true}
+
+# Custom parser
+config :arcana, pdf_parser: MyApp.CustomPDFParser
+```
+
+## Poppler Parser (Default)
+
+The default PDF parser uses Poppler's `pdftotext` command-line utility. It's fast, reliable, and handles most PDFs well.
+
+### Installation
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    brew install poppler
+    ```
+  </Tab>
+
+  <Tab title="Ubuntu/Debian">
+    ```bash
+    sudo apt-get install poppler-utils
+    ```
+  </Tab>
+
+  <Tab title="Fedora">
+    ```bash
+    sudo dnf install poppler-utils
+    ```
+  </Tab>
+
+  <Tab title="Docker">
+    ```dockerfile
+    FROM elixir:1.16-alpine
+    
+    # Install poppler-utils
+    RUN apk add --no-cache poppler-utils
+    
+    # ... rest of your Dockerfile
+    ```
+  </Tab>
+</Tabs>
+
+### Verify Installation
+
+```elixir
+iex> Arcana.FileParser.PDF.Poppler.available?()
+true
+```
+
+### Configuration
+
+```elixir
+# config/config.exs
+
+# Use default settings
+config :arcana, pdf_parser: :poppler
+
+# Preserve original layout
+config :arcana, pdf_parser: {:poppler, layout: true}
+
+# Disable layout preservation for better text flow
+config :arcana, pdf_parser: {:poppler, layout: false}
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `:layout` | `true` | Preserve original text layout (columns, spacing) |
+
+### Usage
+
+```elixir
+# Ingest a PDF file
+{:ok, document} = Arcana.ingest_file("path/to/document.pdf", repo: MyApp.Repo)
+
+# With metadata
+{:ok, document} = Arcana.ingest_file(
+  "paper.pdf",
+  repo: MyApp.Repo,
+  metadata: %{"title" => "Research Paper", "author" => "Jane Doe"}
+)
+
+# Organize into collections
+{:ok, document} = Arcana.ingest_file(
+  "manual.pdf",
+  repo: MyApp.Repo,
+  collection: "manuals"
+)
+```
+
+### When to Use Layout Preservation
+
+<Tabs>
+  <Tab title="Layout: true">
+    **Best for:**
+    - Academic papers
+    - Multi-column documents
+    - Tables and structured data
+    - Documents where spatial layout matters
+
+    ```elixir
+    config :arcana, pdf_parser: {:poppler, layout: true}
+    ```
+
+    **Output Example:**
+    ```
+    Column 1 text here       Column 2 text here
+    More col 1 content       More col 2 content
+    ```
+  </Tab>
+
+  <Tab title="Layout: false">
+    **Best for:**
+    - Books and articles
+    - Single-column documents
+    - When you want continuous text flow
+    - Better for chunking
+
+    ```elixir
+    config :arcana, pdf_parser: {:poppler, layout: false}
+    ```
+
+    **Output Example:**
+    ```
+    Column 1 text here More col 1 content
+    Column 2 text here More col 2 content
+    ```
+  </Tab>
+</Tabs>
+
+## Custom PDF Parser
+
+Implement the `Arcana.FileParser.PDF` behaviour for alternative PDF parsing solutions.
+
+### Implementation Examples
+
+<Tabs>
+  <Tab title="Apache PDFBox">
+    Using PDFBox via Java/Rustler:
+
+    ```elixir
+    defmodule MyApp.PDFBoxParser do
+      @behaviour Arcana.FileParser.PDF
+
+      @impl true
+      def parse(path, opts) when is_binary(path) do
+        # Call PDFBox CLI or Java interop
+        case System.cmd("pdfbox", ["export:text", "-i", path]) do
+          {text, 0} -> {:ok, text}
+          {error, _} -> {:error, {:pdfbox_failed, error}}
+        end
+      end
+
+      # Optional: declare binary support
+      def supports_binary?, do: false
+    end
+    ```
+
+    Configuration:
+    ```elixir
+    config :arcana, pdf_parser: MyApp.PDFBoxParser
+    ```
+  </Tab>
+
+  <Tab title="Cloud API">
+    Using a cloud PDF parsing service:
+
+    ```elixir
+    defmodule MyApp.CloudPDFParser do
+      @behaviour Arcana.FileParser.PDF
+
+      @impl true
+      def parse(binary, opts) when is_binary(binary) do
+        api_key = opts[:api_key] || System.get_env("PDF_API_KEY")
+        
+        # Upload to cloud service
+        case HTTPoison.post(
+          "https://api.pdfparse.com/v1/extract",
+          binary,
+          [
+            {"Authorization", "Bearer #{api_key}"},
+            {"Content-Type", "application/pdf"}
+          ]
+        ) do
+          {:ok, %{body: body}} ->
+            %{"text" => text} = Jason.decode!(body)
+            {:ok, text}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+      end
+
+      # Declare binary support for direct upload
+      def supports_binary?, do: true
+    end
+    ```
+
+    Configuration:
+    ```elixir
+    config :arcana, pdf_parser: {
+      MyApp.CloudPDFParser,
+      api_key: System.get_env("PDF_API_KEY")
+    }
+    ```
+  </Tab>
+
+  <Tab title="Python PyPDF2">
+    Using PyPDF2 via Python port:
+
+    ```elixir
+    defmodule MyApp.PyPDFParser do
+      @behaviour Arcana.FileParser.PDF
+
+      @impl true
+      def parse(path, _opts) when is_binary(path) do
+        python_script = """
+        import sys
+        from PyPDF2 import PdfReader
+        
+        reader = PdfReader(sys.argv[1])
+        text = ''
+        for page in reader.pages:
+            text += page.extract_text()
+        print(text)
+        """
+
+        case System.cmd("python3", ["-c", python_script, path]) do
+          {text, 0} -> {:ok, text}
+          {error, _} -> {:error, {:pypdf_failed, error}}
+        end
+      end
+
+      def supports_binary?, do: false
+    end
+    ```
+  </Tab>
+
+  <Tab title="Rustler NIF">
+    High-performance native PDF parsing:
+
+    ```elixir
+    defmodule MyApp.RustPDFParser do
+      @behaviour Arcana.FileParser.PDF
+
+      use Rustler,
+        otp_app: :my_app,
+        crate: :pdf_parser
+
+      # NIF stub - implemented in Rust
+      def parse_pdf_native(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+      @impl true
+      def parse(path, _opts) when is_binary(path) do
+        case parse_pdf_native(path) do
+          {:ok, text} -> {:ok, text}
+          {:error, reason} -> {:error, reason}
+        end
+      end
+
+      def supports_binary?, do: false
+    end
+    ```
+  </Tab>
+</Tabs>
+
+### Binary Content Support
+
+Some parsers can process PDF binary content directly (useful for file uploads):
+
+```elixir
+defmodule MyApp.BinaryPDFParser do
+  @behaviour Arcana.FileParser.PDF
+
+  @impl true
+  def parse(binary, opts) when is_binary(binary) do
+    # Handle both file paths and binary content
+    if File.exists?(binary) do
+      # It's a file path
+      File.read!(binary) |> extract_text(opts)
+    else
+      # It's binary content
+      extract_text(binary, opts)
+    end
+  end
+
+  # Declare binary support
+  def supports_binary?, do: true
+
+  defp extract_text(binary, _opts) do
+    # Your PDF extraction logic
+    {:ok, "extracted text"}
+  end
+end
+```
+
+Check if a parser supports binary input:
+
+```elixir
+iex> Arcana.FileParser.PDF.supports_binary?({MyApp.BinaryPDFParser, []})
+true
+
+iex> Arcana.FileParser.PDF.supports_binary?({Arcana.FileParser.PDF.Poppler, []})
+false
+```
+
+## Parser Configuration
+
+### Global Configuration
+
+```elixir
+# config/config.exs
+
+# Use default Poppler
+config :arcana, pdf_parser: :poppler
+
+# Custom parser with options
+config :arcana, pdf_parser: {
+  MyApp.CloudPDFParser,
+  api_key: System.get_env("PDF_API_KEY"),
+  timeout: 30_000
+}
+```
+
+### Per-Call Override
+
+```elixir
+# Override parser for specific files
+Arcana.ingest_file(
+  "complex.pdf",
+  repo: MyApp.Repo,
+  pdf_parser: MyApp.AdvancedParser
+)
+
+# With custom options
+Arcana.ingest_file(
+  "scanned.pdf",
+  repo: MyApp.Repo,
+  pdf_parser: {MyApp.OCRParser, language: "eng"}
+)
+```
+
+## Advanced Parsing
+
+### OCR for Scanned PDFs
+
+Handle scanned PDFs with OCR:
+
+```elixir
+defmodule MyApp.OCRParser do
+  @behaviour Arcana.FileParser.PDF
+
+  @impl true
+  def parse(path, opts) do
+    language = opts[:language] || "eng"
+    
+    # First try normal text extraction
+    case Arcana.FileParser.PDF.Poppler.parse(path, opts) do
+      {:ok, text} when byte_size(text) > 100 ->
+        # Got enough text, no OCR needed
+        {:ok, text}
+
+      _ ->
+        # Fallback to OCR
+        perform_ocr(path, language)
+    end
+  end
+
+  defp perform_ocr(path, language) do
+    # Use Tesseract via ImageMagick + Tesseract
+    case System.cmd("sh", ["-c", "
+      pdftoppm #{path} page -png | 
+      tesseract stdin stdout -l #{language}
+    "]) do
+      {text, 0} -> {:ok, text}
+      {error, _} -> {:error, {:ocr_failed, error}}
+    end
+  end
+
+  def supports_binary?, do: false
+end
+```
+
+### Extracting Tables
+
+Extract structured data from PDF tables:
+
+```elixir
+defmodule MyApp.TableParser do
+  @behaviour Arcana.FileParser.PDF
+
+  @impl true
+  def parse(path, opts) do
+    # Use tabula-py or camelot-py for table extraction
+    case System.cmd("python3", ["-c", "
+      import tabula
+      tables = tabula.read_pdf('#{path}', pages='all')
+      text = '\\n'.join([df.to_string() for df in tables])
+      print(text)
+    "]) do
+      {text, 0} -> {:ok, text}
+      {error, _} -> {:error, {:table_extraction_failed, error}}
+    end
+  end
+
+  def supports_binary?, do: false
+end
+```
+
+### Metadata Extraction
+
+Extract PDF metadata along with text:
+
+```elixir
+defmodule MyApp.MetadataPDFParser do
+  @behaviour Arcana.FileParser.PDF
+
+  @impl true
+  def parse(path, opts) do
+    with {:ok, text} <- extract_text(path),
+         {:ok, metadata} <- extract_metadata(path) do
+      # Include metadata in the text for ingestion
+      enriched_text = """
+      Title: #{metadata[:title]}
+      Author: #{metadata[:author]}
+      Created: #{metadata[:created]}
+
+      #{text}
+      """
+      
+      {:ok, enriched_text}
+    end
+  end
+
+  defp extract_text(path) do
+    Arcana.FileParser.PDF.Poppler.parse(path, [])
+  end
+
+  defp extract_metadata(path) do
+    case System.cmd("pdfinfo", [path]) do
+      {info, 0} ->
+        metadata = parse_pdfinfo(info)
+        {:ok, metadata}
+
+      _ ->
+        {:ok, %{}}
+    end
+  end
+
+  defp parse_pdfinfo(info) do
+    info
+    |> String.split("\n")
+    |> Enum.reduce(%{}, fn line, acc ->
+      case String.split(line, ":", parts: 2) do
+        [key, value] ->
+          Map.put(acc, String.downcase(key) |> String.to_atom(), String.trim(value))
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  def supports_binary?, do: false
+end
+```
+
+## Testing PDF Parsers
+
+```elixir
+defmodule MyApp.PDFParserTest do
+  use ExUnit.Case
+
+  @fixtures_path "test/fixtures/pdfs"
+
+  test "parses simple PDF" do
+    path = Path.join(@fixtures_path, "simple.pdf")
+    {:ok, text} = MyApp.CustomPDFParser.parse(path, [])
+
+    assert text =~ "expected content"
+    assert String.length(text) > 100
+  end
+
+  test "handles multi-page PDFs" do
+    path = Path.join(@fixtures_path, "multipage.pdf")
+    {:ok, text} = MyApp.CustomPDFParser.parse(path, [])
+
+    assert text =~ "page 1 content"
+    assert text =~ "page 2 content"
+  end
+
+  test "returns error for corrupted PDF" do
+    path = Path.join(@fixtures_path, "corrupted.pdf")
+    assert {:error, _} = MyApp.CustomPDFParser.parse(path, [])
+  end
+
+  test "supports binary content" do
+    path = Path.join(@fixtures_path, "simple.pdf")
+    binary = File.read!(path)
+
+    if MyApp.CustomPDFParser.supports_binary?() do
+      {:ok, text} = MyApp.CustomPDFParser.parse(binary, [])
+      assert text =~ "expected content"
+    end
+  end
+end
+```
+
+## Error Handling
+
+```elixir
+defmodule MyApp.RobustPDFParser do
+  @behaviour Arcana.FileParser.PDF
+
+  @impl true
+  def parse(path, opts) do
+    cond do
+      not File.exists?(path) ->
+        {:error, :file_not_found}
+
+      not pdf_file?(path) ->
+        {:error, :not_a_pdf}
+
+      true ->
+        do_parse(path, opts)
+    end
+  end
+
+  defp pdf_file?(path) do
+    # Check magic number
+    case File.read(path, 4) do
+      {:ok, <<"%PDF">>} -> true
+      _ -> false
+    end
+  end
+
+  defp do_parse(path, opts) do
+    timeout = opts[:timeout] || 30_000
+
+    Task.async(fn ->
+      Arcana.FileParser.PDF.Poppler.parse(path, opts)
+    end)
+    |> Task.await(timeout)
+  rescue
+    exception ->
+      {:error, {:parse_failed, exception}}
+  catch
+    :exit, reason ->
+      {:error, {:timeout, reason}}
+  end
+
+  def supports_binary?, do: false
+end
+```
+
+## Best Practices
+
+1. **Start with Poppler** - Works well for most PDFs
+2. **Add OCR for scanned docs** - Fallback when text extraction fails
+3. **Set timeouts** - Large PDFs can take time to parse
+4. **Validate input** - Check file exists and is actually a PDF
+5. **Handle errors gracefully** - Log failures but don't crash
+6. **Test with real PDFs** - Different PDF generators produce different output
+7. **Consider layout preservation** - Enable for multi-column, disable for books
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="pdftotext not found">
+    Install Poppler:
+
+    ```bash
+    # macOS
+    brew install poppler
+
+    # Ubuntu
+    sudo apt-get install poppler-utils
+    ```
+
+    Verify installation:
+    ```bash
+    which pdftotext
+    ```
+  </Accordion>
+
+  <Accordion title="Extracted text is garbled">
+    Try disabling layout preservation:
+
+    ```elixir
+    config :arcana, pdf_parser: {:poppler, layout: false}
+    ```
+
+    Or use a different parser for problematic PDFs.
+  </Accordion>
+
+  <Accordion title="Scanned PDFs return empty text">
+    Use OCR:
+
+    ```elixir
+    config :arcana, pdf_parser: MyApp.OCRParser
+    ```
+
+    Requires Tesseract:
+    ```bash
+    brew install tesseract  # macOS
+    apt-get install tesseract-ocr  # Ubuntu
+    ```
+  </Accordion>
+
+  <Accordion title="PDF parsing is slow">
+    Implement async parsing with timeouts:
+
+    ```elixir
+    Task.async(fn -> parse_pdf(path) end)
+    |> Task.await(30_000)
+    ```
+
+    Or use a faster parser like Rust-based solutions.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Chunkers" icon="scissors" href="/configuration/chunkers">
+    Configure text splitting after parsing
+  </Card>
+  <Card title="LLM Integration" icon="robot" href="/configuration/llm">
+    Setup LLMs for question answering
+  </Card>
+</CardGroup>

@@ -1,0 +1,325 @@
+---
+title: Agent.reason/2
+description: Evaluate if search results are sufficient and search again if not
+---
+
+## Function Signature
+
+```elixir
+reason(ctx, opts \\ [])
+```
+
+Evaluates if search results are sufficient and searches again if not, implementing multi-hop reasoning.
+
+## Purpose
+
+This step implements multi-hop reasoning by:
+
+1. Asking the LLM if current results can answer the question
+2. If not, getting a follow-up query and searching again
+3. Repeating until sufficient or max iterations reached
+
+Tracks `queries_tried` to prevent searching the same query twice.
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()">
+  Options for the reason step
+</ParamField>
+
+### Options
+
+<ParamField path="max_iterations" type="integer">
+  Maximum additional searches (default: 2)
+  
+  Limits how many times the agent can perform follow-up searches.
+</ParamField>
+
+<ParamField path="prompt" type="function">
+  Custom prompt function `fn question, chunks -> prompt_string end`
+  
+  Allows customizing how the LLM evaluates result sufficiency.
+</ParamField>
+
+<ParamField path="llm" type="function">
+  Override the LLM function for this step
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="results" type="list(map)">
+  Updated with additional search results if follow-up searches were performed. Chunks are deduplicated across all searches.
+</ResponseField>
+
+<ResponseField name="queries_tried" type="MapSet.t()">
+  Set of all queries that have been searched (prevents duplicates)
+</ResponseField>
+
+<ResponseField name="reason_iterations" type="integer">
+  Number of additional searches performed (0 if results were sufficient)
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.reason()    # Multi-hop if needed
+|> Arcana.Agent.rerank()
+|> Arcana.Agent.answer()
+
+ctx.reason_iterations
+# => 0  # Results were sufficient, no additional searches
+```
+
+### Multi-Hop Scenario
+
+```elixir
+ctx = Arcana.Agent.new("How do I debug a GenServer that's not receiving messages?")
+|> Arcana.Agent.search()
+|> Arcana.Agent.reason(max_iterations: 3)
+
+# Initial search: "How do I debug a GenServer that's not receiving messages?"
+# LLM: "Insufficient - missing info about message tracing"
+# Follow-up search: "GenServer message tracing and debugging"
+# LLM: "Sufficient"
+
+ctx.reason_iterations
+# => 1
+
+ctx.queries_tried
+# => MapSet.new([
+#   "How do I debug a GenServer that's not receiving messages?",
+#   "GenServer message tracing and debugging"
+# ])
+```
+
+### With Custom Max Iterations
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.reason(max_iterations: 5)  # Allow up to 5 follow-up searches
+|> Arcana.Agent.answer()
+```
+
+### With Custom Prompt
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.reason(
+  prompt: fn question, chunks ->
+    context = Enum.map_join(chunks, "\n---\n", & &1.text)
+    """
+    Can you answer this question with the provided information?
+    
+    Question: #{question}
+    
+    Available information:
+    #{context}
+    
+    Respond JSON:
+    - If you can answer: {"sufficient": true, "reasoning": "why"}
+    - If you need more: {"sufficient": false, "missing": "what's missing", "follow_up_query": "query to find it"}
+    """
+  end
+)
+```
+
+### Complete Multi-Hop Pipeline
+
+```elixir
+ctx = Arcana.Agent.new(
+  "What's the best way to handle state in a distributed Elixir application?"
+)
+|> Arcana.Agent.select(collections: ["guides", "best_practices"])
+|> Arcana.Agent.expand()
+|> Arcana.Agent.search()
+|> Arcana.Agent.reason(max_iterations: 2)
+|> Arcana.Agent.rerank()
+|> Arcana.Agent.answer()
+
+# Possible reasoning flow:
+# Search 1: "distributed state management Elixir"
+# → LLM: Need more about specific patterns
+# Search 2: "distributed process registry patterns"
+# → LLM: Need more about consensus
+# Search 3: "distributed consensus Elixir"
+# → LLM: Sufficient (reached max_iterations)
+
+ctx.reason_iterations
+# => 2
+```
+
+## Default Sufficiency Prompt
+
+```elixir
+"""
+Evaluate if these search results are sufficient to answer the question.
+
+Question: #{question}
+
+Retrieved Results:
+#{chunks_text}
+
+Respond with JSON only:
+- If sufficient: {"sufficient": true, "reasoning": "brief explanation"}
+- If not sufficient: {"sufficient": false, "missing": "what info is missing", "follow_up_query": "query to find missing info"}
+"""
+```
+
+## Expected LLM Response
+
+### When Sufficient
+
+```json
+{
+  "sufficient": true,
+  "reasoning": "The results contain complete information about GenServer setup and message handling"
+}
+```
+
+### When Insufficient
+
+```json
+{
+  "sufficient": false,
+  "missing": "No information about debugging tools and tracing",
+  "follow_up_query": "GenServer debugging tools and message tracing"
+}
+```
+
+## Deduplication
+
+Results are deduplicated by chunk ID across all searches:
+
+```elixir
+# Initial search returns chunks [1, 2, 3]
+# Follow-up search returns chunks [3, 4, 5]
+# Final results contain chunks [1, 2, 3, 4, 5]  # No duplicates
+```
+
+## Query Tracking
+
+Prevents infinite loops by tracking tried queries:
+
+```elixir
+# If LLM suggests a query already in queries_tried, stop reasoning
+# This prevents:
+# Search 1: "GenServer"
+# → Follow-up: "GenServer basics"
+# → Follow-up: "GenServer"  # Already tried, stop here
+```
+
+## Collection Selection for Follow-Up
+
+Follow-up searches use collections in this priority:
+
+1. `ctx.collections` (from `select/2`)
+2. Collection from first result
+3. Fallback: `"default"`
+
+```elixir
+ctx
+|> Arcana.Agent.select(collections: ["docs", "guides"])
+|> Arcana.Agent.search()
+|> Arcana.Agent.reason()
+
+# Follow-up searches will use ["docs", "guides"]
+```
+
+## Skip Retrieval
+
+If `gate/2` sets `skip_retrieval: true`, reasoning is skipped:
+
+```elixir
+ctx
+|> Arcana.Agent.gate()     # Sets skip_retrieval: true
+|> Arcana.Agent.search()   # Empty results
+|> Arcana.Agent.reason()   # Skipped
+|> Arcana.Agent.answer()
+```
+
+## Telemetry Event
+
+Emits `[:arcana, :agent, :reason]` with metadata:
+
+```elixir
+# Start metadata
+%{question: ctx.question}
+
+# Stop metadata
+%{iterations: 2}  # Number of follow-up searches performed
+```
+
+## When to Use
+
+Use `reason/2` when:
+
+- Initial search may miss important information
+- Questions require connecting multiple pieces of information
+- You want the agent to autonomously gather more context
+- Complex questions benefit from iterative refinement
+
+## Examples of Multi-Hop Reasoning
+
+### Example 1: Missing Context
+
+**Question:** "How do I fix a GenServer that's crashing?"
+
+1. Initial search: "GenServer crashes"
+   - LLM: "Need more about crash causes"
+2. Follow-up: "Common GenServer crash causes"
+   - LLM: "Need more about debugging"
+3. Follow-up: "GenServer debugging and tracing"
+   - LLM: "Sufficient"
+
+### Example 2: Connecting Concepts
+
+**Question:** "What's the relationship between Supervisors and GenServers?"
+
+1. Initial search: "Supervisors GenServers relationship"
+   - LLM: "Need more about supervision trees"
+2. Follow-up: "Supervisor tree structure"
+   - LLM: "Sufficient"
+
+## Best Practices
+
+1. **Set reasonable max_iterations** - 2-3 is usually sufficient
+2. **Use after initial search** - Let reason/2 handle follow-ups
+3. **Combine with rerank** - Rerank the final merged results
+4. **Monitor iterations** - Track via telemetry to tune max_iterations
+5. **Consider cost** - Each iteration adds LLM calls and searches
+
+## Trade-offs
+
+**Benefits:**
+- More comprehensive answers
+- Handles complex questions requiring multiple information sources
+- Autonomous gap-filling
+
+**Costs:**
+- Additional LLM calls (1 per iteration)
+- Additional searches (1+ per iteration)
+- Increased latency
+- Higher token usage
+
+## Performance Considerations
+
+- Each iteration adds ~1-2 seconds (LLM eval + search)
+- With max_iterations=3, worst case is 3 additional searches
+- Consider user timeout tolerance
+- Monitor actual iteration counts to optimize max_iterations
+
+## See Also
+
+- [search/2](/api-reference/agent/search) - Initial search
+- [rerank/2](/api-reference/agent/rerank) - Rerank merged results
+- [answer/2](/api-reference/agent/answer) - Generate final answer

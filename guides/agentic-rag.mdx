@@ -1,0 +1,475 @@
+---
+title: Agentic RAG Pipeline
+description: Build sophisticated RAG workflows with composable agent steps for query processing, retrieval, and answer generation
+---
+
+The `Arcana.Agent` module provides a pipeline-based approach to RAG where a context struct flows through each step, enabling sophisticated query processing and retrieval strategies.
+
+## Overview
+
+Build complex RAG workflows by composing pipeline steps:
+
+```elixir
+alias Arcana.Agent
+
+ctx =
+  Agent.new("Compare Elixir and Erlang")
+  |> Agent.gate()        # Decide if retrieval is needed
+  |> Agent.rewrite()     # Clean up conversational input
+  |> Agent.expand()      # Expand query with synonyms
+  |> Agent.decompose()   # Break into sub-questions
+  |> Agent.search()      # Search for each sub-question
+  |> Agent.reason()      # Multi-hop: search again if needed
+  |> Agent.rerank()      # Re-rank results
+  |> Agent.answer()      # Generate final answer
+
+ctx.answer
+```
+
+## Configuration
+
+Set defaults in your config to avoid passing options every time:
+
+```elixir config/config.exs
+config :arcana,
+  repo: MyApp.Repo,
+  llm: &MyApp.LLM.complete/1
+```
+
+You can still override per-call:
+
+```elixir
+Agent.new("Question", repo: OtherRepo, llm: other_llm)
+```
+
+## Pipeline Steps
+
+### new/1,2 - Initialize Context
+
+Creates the context with your question and optional overrides:
+
+```elixir
+# Uses config defaults
+ctx = Agent.new("What is Elixir?")
+
+# With explicit options
+ctx = Agent.new("What is Elixir?",
+  repo: MyApp.Repo,
+  llm: llm,
+  limit: 5,        # Max chunks per search
+  threshold: 0.5   # Minimum similarity
+)
+```
+
+### gate/2 - Retrieval Gating
+
+Decide if the question needs retrieval or can be answered from knowledge:
+
+```elixir
+ctx = Agent.gate(ctx)
+
+ctx.skip_retrieval   # true if retrieval can be skipped
+ctx.gate_reasoning   # "Basic arithmetic can be answered from knowledge"
+```
+
+When `skip_retrieval` is true:
+- `search/2` skips the search and sets `results: []`
+- `reason/2` skips multi-hop reasoning
+- `answer/2` uses a no-context prompt
+
+<Tip>
+Use gating when your questions mix simple facts with domain-specific queries to reduce latency and cost.
+</Tip>
+
+```elixir Example: Math Question
+ctx =
+  Agent.new("What is 2 + 2?", repo: MyApp.Repo, llm: llm)
+  |> Agent.gate()
+  |> Agent.search()
+  |> Agent.answer()
+
+ctx.skip_retrieval  # => true
+ctx.answer          # => "4" (answered from knowledge)
+```
+
+### rewrite/2 - Clean Conversational Input
+
+Transform conversational input into clear search queries:
+
+```elixir
+ctx = Agent.rewrite(ctx)
+
+ctx.rewritten_query
+# "Hey, I want to compare Elixir and Go" → "compare Elixir and Go"
+```
+
+Removes greetings and filler phrases while preserving technical terms. Use when questions come from chatbots or voice interfaces.
+
+### select/2 - Route to Collections
+
+Route the question to specific collections based on content:
+
+```elixir
+ctx
+|> Agent.select(collections: ["docs", "api", "tutorials"])
+|> Agent.search()
+```
+
+The LLM decides which collection(s) are most relevant. Collection descriptions (if set during ingest) are included in the prompt.
+
+### expand/2 - Query Expansion
+
+Add synonyms and related terms to improve retrieval:
+
+```elixir
+ctx = Agent.expand(ctx)
+
+ctx.expanded_query
+# => "Elixir programming language functional BEAM Erlang VM"
+```
+
+<Note>
+Use `expand/2` when queries contain abbreviations, jargon, or domain-specific terms.
+</Note>
+
+### decompose/2 - Query Decomposition
+
+Break complex questions into simpler sub-questions:
+
+```elixir
+ctx = Agent.decompose(ctx)
+
+ctx.sub_questions
+# => ["What is Elixir?", "What is Erlang?", "How do they compare?"]
+```
+
+<Tip>
+Use `decompose/2` when questions have multiple parts. You can combine it with `expand/2` to expand each sub-question.
+</Tip>
+
+### search/2 - Execute Search
+
+Search using the original question, expanded query, or sub-questions:
+
+```elixir
+ctx = Agent.search(ctx)
+
+ctx.results
+# => [%{question: "...", collection: "...", chunks: [...]}]
+```
+
+#### Explicit Collection Selection
+
+Pass `:collection` or `:collections` to search specific collections without using `select/2`:
+
+```elixir
+# Search a single collection
+ctx
+|> Agent.search(collection: "technical_docs")
+|> Agent.answer()
+
+# Search multiple collections
+ctx
+|> Agent.search(collections: ["docs", "faq"])
+|> Agent.answer()
+```
+
+**Collection selection priority:**
+1. `:collection`/`:collections` option passed to `search/2`
+2. `ctx.collections` (set by `select/2`)
+3. Falls back to `"default"` collection
+
+<Tip>
+Use explicit collection selection when you have only one collection or the user explicitly chooses which to search.
+</Tip>
+
+### reason/2 - Multi-hop Reasoning
+
+Evaluate if search results are sufficient and search again if not:
+
+```elixir
+ctx = Agent.reason(ctx, max_iterations: 2)
+
+ctx.reason_iterations  # Number of additional searches
+ctx.queries_tried      # MapSet of all queries attempted
+```
+
+The agent:
+1. Asks the LLM if current results can answer the question
+2. If not, gets a follow-up query from the LLM
+3. Executes the follow-up search and merges results
+4. Repeats until sufficient or `max_iterations` reached
+
+```elixir Example: Multi-hop Question
+ctx =
+  Agent.new("How does Elixir handle concurrency and error recovery?")
+  |> Agent.search()
+  |> Agent.reason(max_iterations: 3)
+  |> Agent.answer()
+
+ctx.reason_iterations  # => 1
+ctx.queries_tried      # => MapSet.new(["How does Elixir...", "Elixir error recovery"])
+```
+
+### rerank/2 - Re-rank Results
+
+Score and filter chunks by relevance:
+
+```elixir
+ctx = Agent.rerank(ctx, threshold: 7)
+```
+
+See the [Re-ranking Guide](/guides/reranking) for details.
+
+### answer/2 - Generate Answer
+
+Generate the final answer from retrieved context:
+
+```elixir
+ctx = Agent.answer(ctx)
+
+ctx.answer
+# => "Elixir is a functional programming language..."
+ctx.context_used
+# => [%Arcana.Chunk{...}, ...]
+```
+
+When `skip_retrieval` is true (set by `gate/2`), `answer/2` uses a no-context prompt and answers from the LLM's knowledge.
+
+## Custom Prompts
+
+Every LLM-powered step accepts a custom prompt function and optional LLM override:
+
+<CodeGroup>
+
+```elixir Rewrite
+Agent.rewrite(ctx, prompt: fn question ->
+  "Clean up this conversational input: #{question}"
+end)
+```
+
+```elixir Expand
+Agent.expand(ctx, prompt: fn question ->
+  "Expand this query for better search: #{question}"
+end)
+```
+
+```elixir Decompose
+Agent.decompose(ctx, prompt: fn question ->
+  """
+  Split this into sub-questions. Return JSON:
+  {"sub_questions": ["q1", "q2"]}
+
+  Question: #{question}
+  """
+end)
+```
+
+```elixir Answer
+Agent.answer(ctx, prompt: fn question, chunks ->
+  context = Enum.map_join(chunks, "\n", & &1.text)
+  """
+  Answer based only on this context:
+  #{context}
+
+  Question: #{question}
+  """
+end)
+```
+
+</CodeGroup>
+
+You can also override the LLM for specific steps:
+
+```elixir
+Agent.rewrite(ctx, llm: faster_llm)
+Agent.answer(ctx, llm: more_capable_llm)
+```
+
+## Custom Implementations
+
+Every pipeline step has a behaviour and can be replaced with a custom implementation.
+
+### Available Behaviours
+
+| Step | Behaviour | Default | Option |
+|------|-----------|---------|--------|
+| `rewrite/2` | `Arcana.Agent.Rewriter` | `Rewriter.LLM` | `:rewriter` |
+| `select/2` | `Arcana.Agent.Selector` | `Selector.LLM` | `:selector` |
+| `expand/2` | `Arcana.Agent.Expander` | `Expander.LLM` | `:expander` |
+| `decompose/2` | `Arcana.Agent.Decomposer` | `Decomposer.LLM` | `:decomposer` |
+| `search/2` | `Arcana.Agent.Searcher` | `Searcher.Arcana` | `:searcher` |
+| `rerank/2` | `Arcana.Agent.Reranker` | `Reranker.LLM` | `:reranker` |
+| `answer/2` | `Arcana.Agent.Answerer` | `Answerer.LLM` | `:answerer` |
+
+### Custom Expander Example
+
+Expand queries with domain-specific knowledge:
+
+```elixir
+defmodule MyApp.MedicalExpander do
+  @behaviour Arcana.Agent.Expander
+
+  @impl true
+  def expand(question, _opts) do
+    terms = MyApp.MedicalThesaurus.expand_terms(question)
+    {:ok, question <> " " <> Enum.join(terms, " ")}
+  end
+end
+
+Agent.expand(ctx, expander: MyApp.MedicalExpander)
+```
+
+### Custom Searcher Example
+
+Replace the default pgvector search with any backend:
+
+```elixir
+defmodule MyApp.ElasticsearchSearcher do
+  @behaviour Arcana.Agent.Searcher
+
+  @impl true
+  def search(question, collection, opts) do
+    limit = Keyword.get(opts, :limit, 5)
+
+    chunks =
+      MyApp.Elasticsearch.search(collection, question, size: limit)
+      |> Enum.map(fn hit ->
+        %{
+          id: hit["_id"],
+          text: hit["_source"]["text"],
+          document_id: hit["_source"]["document_id"],
+          score: hit["_score"]
+        }
+      end)
+
+    {:ok, chunks}
+  end
+end
+
+ctx
+|> Agent.search(searcher: MyApp.ElasticsearchSearcher)
+|> Agent.answer()
+```
+
+### Inline Functions
+
+For quick customizations, pass a function instead of a module:
+
+```elixir
+# Inline rewriter
+Agent.rewrite(ctx, rewriter: fn question, _opts ->
+  {:ok, String.downcase(question)}
+end)
+
+# Inline searcher
+Agent.search(ctx, searcher: fn question, collection, opts ->
+  # Your search logic
+  {:ok, chunks}
+end)
+```
+
+## Example Pipelines
+
+<Tabs>
+  <Tab title="Simple RAG">
+    ```elixir
+    ctx =
+      Agent.new(question, repo: repo, llm: llm)
+      |> Agent.search()
+      |> Agent.answer()
+    ```
+  </Tab>
+  
+  <Tab title="With Expansion">
+    ```elixir
+    ctx =
+      Agent.new(question, repo: repo, llm: llm)
+      |> Agent.expand()
+      |> Agent.search()
+      |> Agent.answer()
+    ```
+  </Tab>
+  
+  <Tab title="Full Pipeline">
+    ```elixir
+    ctx =
+      Agent.new(question, repo: repo, llm: llm)
+      |> Agent.select(collections: ["docs", "api"])
+      |> Agent.expand()
+      |> Agent.decompose()
+      |> Agent.search()
+      |> Agent.rerank(threshold: 7)
+      |> Agent.answer()
+    ```
+  </Tab>
+  
+  <Tab title="Conditional">
+    ```elixir
+    ctx = Agent.new(question, repo: repo, llm: llm)
+
+    ctx =
+      if complex_question?(question) do
+        ctx |> Agent.decompose()
+      else
+        ctx |> Agent.expand()
+      end
+
+    ctx
+    |> Agent.search()
+    |> Agent.rerank()
+    |> Agent.answer()
+    ```
+  </Tab>
+</Tabs>
+
+## Error Handling
+
+Errors are stored in the context and propagate through the pipeline:
+
+```elixir
+ctx = Agent.new("Question", repo: repo, llm: llm)
+  |> Agent.search()
+  |> Agent.answer()
+
+case ctx.error do
+  nil -> IO.puts("Answer: #{ctx.answer}")
+  error -> IO.puts("Error: #{inspect(error)}")
+end
+```
+
+Steps skip execution when an error is present.
+
+## Telemetry
+
+Each step emits telemetry events for monitoring:
+
+```elixir
+:telemetry.attach(
+  "agent-logger",
+  [:arcana, :agent, :search, :stop],
+  fn _event, measurements, metadata, _config ->
+    IO.puts("Search found #{metadata.total_chunks} chunks in #{measurements.duration}ns")
+  end,
+  nil
+)
+```
+
+See the [Telemetry Guide](/guides/telemetry) for complete event documentation.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Re-ranking" icon="ranking-star" href="/guides/reranking">
+    Improve retrieval quality with result re-scoring
+  </Card>
+  <Card title="Search Algorithms" icon="magnifying-glass" href="/guides/search-algorithms">
+    Understand how semantic, full-text, and hybrid search work
+  </Card>
+  <Card title="Evaluation" icon="chart-line" href="/guides/evaluation">
+    Measure and improve your RAG pipeline quality
+  </Card>
+  <Card title="Telemetry" icon="chart-mixed" href="/guides/telemetry">
+    Monitor performance and debug issues
+  </Card>
+</CardGroup>

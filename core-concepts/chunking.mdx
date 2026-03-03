@@ -1,0 +1,905 @@
+---
+title: 'Chunking Strategies'
+description: 'How to split documents effectively for better RAG retrieval'
+icon: 'scissors'
+---
+
+## Why Chunking Matters
+
+Chunking is the process of splitting documents into smaller segments before embedding. It's crucial for RAG because:
+
+<CardGroup cols={2}>
+  <Card title="Context Windows" icon="window">
+    LLMs have token limits (GPT-4: 128K tokens). Entire documents often don't fit.
+  </Card>
+  
+  <Card title="Relevance" icon="bullseye">
+    Smaller chunks = more precise retrieval. "Page 47, paragraph 3" is more useful than "entire manual".
+  </Card>
+  
+  <Card title="Embedding Quality" icon="brain">
+    Embeddings capture meaning better for focused segments vs entire documents.
+  </Card>
+  
+  <Card title="Search Precision" icon="magnifying-glass">
+    Find exactly relevant sections without irrelevant surrounding text.
+  </Card>
+</CardGroup>
+
+## How Chunking Works in Arcana
+
+From `lib/arcana/ingest.ex:56`:
+
+```elixir
+# 1. Configure chunker
+chunker_config = Arcana.Config.resolve_chunker(opts)
+# => {Arcana.Chunker.Default, [chunk_size: 450, chunk_overlap: 50]}
+
+# 2. Split text into chunks
+chunks = Chunker.chunk(chunker_config, text, chunk_opts)
+# => [
+#   %{text: "...", chunk_index: 0, token_count: 342},
+#   %{text: "...", chunk_index: 1, token_count: 385},
+#   %{text: "...", chunk_index: 2, token_count: 421}
+# ]
+
+# 3. Each chunk is embedded and stored separately
+Enum.each(chunks, fn chunk ->
+  {:ok, embedding} = Embedder.embed(embedder, chunk.text)
+  repo.insert!(%Chunk{text: chunk.text, embedding: embedding, ...})
+end)
+```
+
+### Chunk Structure
+
+Every chunk returned by a chunker must include:
+
+```elixir
+%{
+  text: "The actual chunk content...",  # required
+  chunk_index: 0,                        # required, 0-based position
+  token_count: 342                       # required, estimated tokens
+}
+```
+
+From `lib/arcana/chunker.ex:49-58`.
+
+## Default Chunker Configuration
+
+Arcana uses the `text_chunker` library with smart defaults:
+
+<Tabs>
+  <Tab title="Configuration">
+    **Defaults** (from `lib/arcana/chunker/default.ex:26-29`):
+    
+    ```elixir
+    @default_chunk_size 450       # tokens
+    @default_chunk_overlap 50     # tokens
+    @default_format :plaintext
+    @default_size_unit :tokens
+    ```
+    
+    **Configure globally**:
+    
+    ```elixir
+    # config/config.exs
+    config :arcana, 
+      chunker: {:default, 
+        chunk_size: 512,
+        chunk_overlap: 100,
+        format: :markdown,
+        size_unit: :tokens
+      }
+    ```
+    
+    **Or per-ingestion**:
+    
+    ```elixir
+    {:ok, document} = Arcana.ingest(text,
+      repo: MyApp.Repo,
+      chunk_size: 600,
+      chunk_overlap: 75,
+      format: :markdown
+    )
+    ```
+  </Tab>
+  
+  <Tab title="Size Units">
+    Arcana supports two sizing modes:
+    
+    **Tokens** (default):
+    ```elixir
+    # Good for LLM context limits
+    chunk_size: 450,      # ~450 tokens
+    size_unit: :tokens
+    
+    # Converted to ~1800 characters internally (4 chars/token)
+    # From lib/arcana/chunker/default.ex:42-48
+    ```
+    
+    **Characters**:
+    ```elixir
+    # Good for fixed-width displays
+    chunk_size: 2000,     # 2000 characters
+    size_unit: :characters
+    ```
+    
+    <Note>
+    Token estimation uses **~4 characters per token** for English text, matching typical BPE tokenizer behavior (lib/arcana/chunker/default.ex:73-77).
+    </Note>
+  </Tab>
+  
+  <Tab title="Overlap">
+    **Why overlap matters**:
+    
+    ```text
+    Without overlap:
+    [Chunk 1: "...discussing machine learning"] 
+    [Chunk 2: "models for prediction tasks..."]
+    ❌ "machine learning models" split across chunks
+    
+    With 50 token overlap:
+    [Chunk 1: "...discussing machine learning models for..."]
+    [Chunk 2: "...learning models for prediction tasks..."]
+    ✅ "machine learning models" appears in both chunks
+    ```
+    
+    **Recommended overlap**: 10-15% of chunk size
+    
+    ```elixir
+    chunk_size: 450
+    chunk_overlap: 50   # ~11% overlap
+    
+    chunk_size: 1000
+    chunk_overlap: 150  # 15% overlap
+    ```
+  </Tab>
+</Tabs>
+
+## Format-Aware Chunking
+
+The default chunker preserves document structure:
+
+<Tabs>
+  <Tab title="Markdown">
+    **Respects headings and sections**:
+    
+    ```elixir
+    text = """
+    # Introduction
+    Elixir is a functional language.
+    
+    ## Key Features
+    - Concurrency via processes
+    - Pattern matching
+    
+    ## OTP Framework
+    Built on Erlang's OTP...
+    """
+    
+    {:ok, document} = Arcana.ingest(text,
+      repo: MyApp.Repo,
+      format: :markdown,  # Chunker preserves section boundaries
+      chunk_size: 300
+    )
+    
+    # Result chunks:
+    # 1. "# Introduction\nElixir is a functional language."
+    # 2. "## Key Features\n- Concurrency via processes\n- Pattern matching"
+    # 3. "## OTP Framework\nBuilt on Erlang's OTP..."
+    ```
+    
+    **Benefits**:
+    - Keeps related content together
+    - Preserves hierarchical structure
+    - Better semantic coherence
+  </Tab>
+  
+  <Tab title="Code">
+    **Respects function boundaries**:
+    
+    ```elixir
+    code = """
+    defmodule MyApp.User do
+      def create(attrs) do
+        %User{}
+        |> User.changeset(attrs)
+        |> Repo.insert()
+      end
+      
+      def update(user, attrs) do
+        user
+        |> User.changeset(attrs)
+        |> Repo.update()
+      end
+    end
+    """
+    
+    {:ok, document} = Arcana.ingest(code,
+      repo: MyApp.Repo,
+      format: :elixir,  # Chunks at function boundaries
+      chunk_size: 200
+    )
+    
+    # Each function stays together when possible
+    ```
+    
+    **Supported formats** (from text_chunker library):
+    - `:elixir`
+    - `:python`
+    - `:javascript`
+    - `:typescript`
+  </Tab>
+  
+  <Tab title="Plain Text">
+    **Chunks at sentence/paragraph boundaries**:
+    
+    ```elixir
+    text = """
+    First paragraph with multiple sentences. This continues 
+    the same idea. More content here.
+    
+    Second paragraph starts a new topic. It has its own 
+    sentences and concepts.
+    
+    Third paragraph...
+    """
+    
+    {:ok, document} = Arcana.ingest(text,
+      repo: MyApp.Repo,
+      format: :plaintext,  # default
+      chunk_size: 150
+    )
+    
+    # Tries to break at paragraph boundaries first,
+    # then sentence boundaries if needed
+    ```
+  </Tab>
+</Tabs>
+
+## Chunking Best Practices
+
+### Chunk Size Guidelines
+
+<Tabs>
+  <Tab title="Small Chunks (200-400 tokens)">
+    **Best for**:
+    - Precise fact retrieval
+    - Question answering
+    - FAQ documents
+    - API references
+    
+    **Example**:
+    ```elixir
+    # API documentation search
+    config :arcana, 
+      chunker: {:default, 
+        chunk_size: 300,
+        chunk_overlap: 50
+      }
+    
+    # Each function gets its own chunk:
+    # Chunk 1: "Arcana.search/2 - Searches for chunks..."
+    # Chunk 2: "Arcana.ingest/2 - Ingests text content..."
+    ```
+    
+    **Pros**:
+    - ✅ High precision
+    - ✅ Fast embedding generation
+    - ✅ Fits more context chunks in LLM window
+    
+    **Cons**:
+    - ❌ May split related concepts
+    - ❌ More chunks to search through
+    - ❌ Less context per chunk
+  </Tab>
+  
+  <Tab title="Medium Chunks (400-600 tokens)">
+    **Best for** (DEFAULT):
+    - General knowledge bases
+    - Documentation
+    - Blog posts
+    - Technical articles
+    
+    **Example**:
+    ```elixir
+    # Default configuration
+    config :arcana, 
+      chunker: {:default, 
+        chunk_size: 450,  # ← default
+        chunk_overlap: 50
+      }
+    
+    # Balanced chunks with full context:
+    # "The RAG pipeline has six steps. First, chunking 
+    #  splits documents... Second, embedding converts..."
+    ```
+    
+    **Pros**:
+    - ✅ Good balance of precision and context
+    - ✅ Reasonable embedding speed
+    - ✅ Works well for most use cases
+    
+    **Cons**:
+    - ⚠️ May need tuning per domain
+  </Tab>
+  
+  <Tab title="Large Chunks (800-1200 tokens)">
+    **Best for**:
+    - Narrative content
+    - Research papers
+    - Long-form explanations
+    - Summarization tasks
+    
+    **Example**:
+    ```elixir
+    # Research paper ingestion
+    {:ok, document} = Arcana.ingest(paper_text,
+      repo: MyApp.Repo,
+      chunk_size: 1000,
+      chunk_overlap: 150,
+      format: :markdown  # Preserve section structure
+    )
+    
+    # Each chunk contains a complete section/argument
+    ```
+    
+    **Pros**:
+    - ✅ Full context preserved
+    - ✅ Better for complex topics
+    - ✅ Fewer chunks overall
+    
+    **Cons**:
+    - ❌ Lower precision (more irrelevant content per chunk)
+    - ❌ Fewer chunks fit in LLM context window
+    - ❌ Slower embedding generation
+  </Tab>
+</Tabs>
+
+### Overlap Recommendations
+
+```elixir
+# Rule of thumb: 10-15% of chunk size
+
+# Small chunks
+chunk_size: 300
+chunk_overlap: 30   # 10%
+
+# Medium chunks (default)
+chunk_size: 450
+chunk_overlap: 50   # 11%
+
+# Large chunks
+chunk_size: 1000
+chunk_overlap: 150  # 15%
+
+# Too little overlap
+chunk_overlap: 10   # ❌ Concepts at boundaries get split
+
+# Too much overlap
+chunk_overlap: 300  # ❌ Redundant chunks, slower search
+```
+
+### Context Window Calculation
+
+**Ensure chunks fit in LLM context**:
+
+```elixir
+# GPT-4o: 128K token context window
+# Leave room for:
+# - System prompt: ~500 tokens
+# - User question: ~100 tokens
+# - Response: ~1000 tokens
+# Available for context: ~126,400 tokens
+
+chunk_size = 450
+max_chunks = 126_400 / chunk_size
+# => ~280 chunks fit (theoretical)
+
+# But you should use far fewer for cost/quality
+typical_chunks = 5    # Simple questions
+complex_chunks = 15   # Complex questions
+
+typical_tokens = typical_chunks * chunk_size  # 2,250 tokens
+complex_tokens = complex_chunks * chunk_size  # 6,750 tokens
+
+# Both easily fit in context window
+```
+
+## Custom Chunkers
+
+Implement the `Arcana.Chunker` behaviour for custom logic:
+
+<Tabs>
+  <Tab title="Semantic Chunker">
+    **Split by topic changes** using embeddings:
+    
+    ```elixir
+    defmodule MyApp.SemanticChunker do
+      @behaviour Arcana.Chunker
+      
+      @impl true
+      def chunk(text, opts) do
+        # 1. Split into sentences
+        sentences = String.split(text, ~r/[.!?]\s+/)
+        
+        # 2. Embed each sentence
+        embeddings = Enum.map(sentences, &embed_sentence/1)
+        
+        # 3. Find topic boundaries (low similarity = new topic)
+        boundaries = find_semantic_boundaries(embeddings, threshold: 0.6)
+        
+        # 4. Group sentences into chunks at boundaries
+        boundaries
+        |> group_sentences(sentences)
+        |> Enum.with_index()
+        |> Enum.map(fn {chunk_text, index} ->
+          %{
+            text: chunk_text,
+            chunk_index: index,
+            token_count: estimate_tokens(chunk_text)
+          }
+        end)
+      end
+      
+      defp find_semantic_boundaries(embeddings, opts) do
+        threshold = opts[:threshold]
+        
+        embeddings
+        |> Enum.chunk_every(2, 1, :discard)
+        |> Enum.with_index()
+        |> Enum.filter(fn {[emb1, emb2], _idx} ->
+          cosine_similarity(emb1, emb2) < threshold
+        end)
+        |> Enum.map(fn {_, idx} -> idx end)
+      end
+    end
+    
+    # config/config.exs
+    config :arcana, chunker: MyApp.SemanticChunker
+    ```
+  </Tab>
+  
+  <Tab title="Sliding Window Chunker">
+    **Fixed-size overlapping windows**:
+    
+    ```elixir
+    defmodule MyApp.SlidingWindowChunker do
+      @behaviour Arcana.Chunker
+      
+      @impl true
+      def chunk(text, opts) do
+        window_size = Keyword.get(opts, :window_size, 500)
+        step_size = Keyword.get(opts, :step_size, 400)
+        
+        text
+        |> String.graphemes()
+        |> Enum.chunk_every(window_size, step_size, :discard)
+        |> Enum.with_index()
+        |> Enum.map(fn {chars, index} ->
+          chunk_text = Enum.join(chars)
+          
+          %{
+            text: chunk_text,
+            chunk_index: index,
+            token_count: estimate_tokens(chunk_text)
+          }
+        end)
+      end
+      
+      defp estimate_tokens(text) do
+        max(1, div(String.length(text), 4))
+      end
+    end
+    
+    # Use with specific options
+    {:ok, document} = Arcana.ingest(text,
+      repo: MyApp.Repo,
+      chunker: {MyApp.SlidingWindowChunker, 
+        window_size: 600, 
+        step_size: 500
+      }
+    )
+    ```
+  </Tab>
+  
+  <Tab title="Heading-Based Chunker">
+    **Split at markdown headings**:
+    
+    ```elixir
+    defmodule MyApp.HeadingChunker do
+      @behaviour Arcana.Chunker
+      
+      @impl true
+      def chunk(text, opts) do
+        max_size = Keyword.get(opts, :max_chunk_size, 1000)
+        
+        text
+        |> split_by_headings()
+        |> merge_small_sections(max_size)
+        |> Enum.with_index()
+        |> Enum.map(fn {section_text, index} ->
+          %{
+            text: section_text,
+            chunk_index: index,
+            token_count: estimate_tokens(section_text)
+          }
+        end)
+      end
+      
+      defp split_by_headings(text) do
+        # Split at ## headings (keep heading with content)
+        Regex.split(~r/(?=^##\s)/m, text, trim: true)
+      end
+      
+      defp merge_small_sections(sections, max_size) do
+        sections
+        |> Enum.reduce([], fn section, acc ->
+          case acc do
+            [] -> 
+              [section]
+            
+            [prev | rest] when String.length(prev) < max_size ->
+              # Merge with previous if under max_size
+              merged = prev <> "\n\n" <> section
+              [merged | rest]
+            
+            _ -> 
+              # Start new chunk
+              [section | acc]
+          end
+        end)
+        |> Enum.reverse()
+      end
+      
+      defp estimate_tokens(text), do: max(1, div(String.length(text), 4))
+    end
+    ```
+  </Tab>
+</Tabs>
+
+## Real-World Examples
+
+<Tabs>
+  <Tab title="Documentation">
+    ```elixir
+    # Phoenix documentation ingestion
+    defmodule MyApp.Docs.Ingest do
+      def ingest_phoenix_docs do
+        docs_path = "deps/phoenix/guides/"
+        
+        docs_path
+        |> File.ls!()
+        |> Enum.filter(&String.ends_with?(&1, ".md"))
+        |> Enum.each(fn file ->
+          path = Path.join(docs_path, file)
+          
+          {:ok, document} = Arcana.ingest_file(path,
+            repo: MyApp.Repo,
+            collection: "phoenix-docs",
+            format: :markdown,     # Preserve structure
+            chunk_size: 500,       # Medium chunks
+            chunk_overlap: 75,     # 15% overlap
+            metadata: %{
+              source: "Phoenix Guides",
+              file: file
+            }
+          )
+          
+          IO.puts("Ingested #{file}: #{document.chunk_count} chunks")
+        end)
+      end
+    end
+    
+    # Result: ~200 files → ~3,000 chunks
+    # Chunk size: 500 tokens = good balance for technical docs
+    # Each heading section stays together
+    ```
+  </Tab>
+  
+  <Tab title="API Reference">
+    ```elixir
+    # Function documentation (one function per chunk)
+    defmodule MyApp.API.Ingest do
+      def ingest_api_docs(module_docs) do
+        module_docs
+        |> extract_function_docs()
+        |> Enum.each(fn {function_name, doc_text} ->
+          # Small chunks - each function separate
+          {:ok, document} = Arcana.ingest(doc_text,
+            repo: MyApp.Repo,
+            collection: "api-docs",
+            chunk_size: 250,      # Small for precision
+            chunk_overlap: 25,    # Minimal overlap
+            metadata: %{
+              function: function_name,
+              module: module_docs.module
+            }
+          )
+        end)
+      end
+      
+      defp extract_function_docs(module_docs) do
+        # Parse ExDoc format
+        module_docs.functions
+        |> Enum.map(fn {name, arity, doc} ->
+          function_name = "#{name}/#{arity}"
+          {function_name, doc}
+        end)
+      end
+    end
+    
+    # Result: High precision for function lookup
+    # Query: "Arcana.search/2" → exact function doc
+    ```
+  </Tab>
+  
+  <Tab title="Research Papers">
+    ```elixir
+    # Academic papers (large chunks, preserve arguments)
+    defmodule MyApp.Research.Ingest do
+      def ingest_paper(pdf_path) do
+        {:ok, document} = Arcana.ingest_file(pdf_path,
+          repo: MyApp.Repo,
+          collection: "research-papers",
+          chunk_size: 1000,       # Large chunks
+          chunk_overlap: 150,     # 15% overlap
+          format: :plaintext,     # PDFs convert to plain text
+          metadata: %{
+            content_type: "research-paper",
+            source: Path.basename(pdf_path)
+          }
+        )
+        
+        # Also extract citations and metadata
+        extract_paper_metadata(document)
+        
+        document
+      end
+      
+      defp extract_paper_metadata(document) do
+        # Could use GraphRAG to extract:
+        # - Authors
+        # - Institutions
+        # - Citations
+        # - Key terms
+        Arcana.Graph.build_and_persist(
+          document.chunks,
+          document.collection,
+          MyApp.Repo,
+          graph: true
+        )
+      end
+    end
+    
+    # Result: Each chunk = complete argument/section
+    # Better for understanding complex concepts
+    ```
+  </Tab>
+  
+  <Tab title="Customer Support">
+    ```elixir
+    # FAQ and support articles
+    defmodule MyApp.Support.Ingest do
+      def ingest_faq(faq_list) do
+        faq_list
+        |> Enum.each(fn %{question: q, answer: a} ->
+          # Each Q&A pair = one chunk
+          text = "Q: #{q}\n\nA: #{a}"
+          
+          {:ok, document} = Arcana.ingest(text,
+            repo: MyApp.Repo,
+            collection: "support-faq",
+            chunk_size: 400,      # One Q&A per chunk
+            chunk_overlap: 0,     # No overlap needed
+            metadata: %{
+              type: "faq",
+              question: q
+            }
+          )
+        end)
+      end
+      
+      def search_faq(user_question) do
+        # High precision search
+        {:ok, results} = Arcana.search(user_question,
+          repo: MyApp.Repo,
+          collection: "support-faq",
+          mode: :hybrid,    # Match question semantics + keywords
+          limit: 3,         # Top 3 most relevant FAQs
+          threshold: 0.75   # High threshold for quality
+        )
+        
+        results
+      end
+    end
+    
+    # Result: Precise matching for user questions
+    ```
+  </Tab>
+</Tabs>
+
+## Optimization Tips
+
+<Steps>
+  <Step title="Start with Defaults">
+    Use 450 tokens / 50 overlap initially:
+    
+    ```elixir
+    # Good starting point for most use cases
+    config :arcana, 
+      chunker: {:default, 
+        chunk_size: 450,
+        chunk_overlap: 50
+      }
+    ```
+  </Step>
+  
+  <Step title="Measure Retrieval Quality">
+    Use evaluation metrics to test different sizes:
+    
+    ```elixir
+    # Test different chunk sizes
+    [300, 450, 600, 900]
+    |> Enum.each(fn size ->
+      # Re-ingest with new size
+      # Run test queries
+      # Measure MRR, Recall, Precision
+      metrics = Arcana.Evaluation.run(test_cases, 
+        chunk_size: size
+      )
+      
+      IO.inspect({size, metrics})
+    end)
+    ```
+    
+    See [Evaluation Guide](/guides/evaluation).
+  </Step>
+  
+  <Step title="Adjust Per Content Type">
+    Different content needs different chunking:
+    
+    ```elixir
+    defmodule MyApp.Ingest do
+      def ingest(content, type) do
+        chunk_config = chunk_config_for_type(type)
+        
+        Arcana.ingest(content,
+          repo: MyApp.Repo,
+          chunker: chunk_config
+        )
+      end
+      
+      defp chunk_config_for_type(:api_docs) do
+        {:default, chunk_size: 250, chunk_overlap: 25}
+      end
+      
+      defp chunk_config_for_type(:guide) do
+        {:default, chunk_size: 500, chunk_overlap: 75}
+      end
+      
+      defp chunk_config_for_type(:paper) do
+        {:default, chunk_size: 1000, chunk_overlap: 150}
+      end
+    end
+    ```
+  </Step>
+  
+  <Step title="Monitor Chunk Statistics">
+    Track chunk distribution:
+    
+    ```elixir
+    defmodule MyApp.ChunkStats do
+      import Ecto.Query
+      
+      def analyze(repo) do
+        query = from c in Arcana.Chunk,
+          select: %{
+            avg_tokens: avg(c.token_count),
+            min_tokens: min(c.token_count),
+            max_tokens: max(c.token_count),
+            total_chunks: count(c.id)
+          }
+        
+        stats = repo.one(query)
+        
+        IO.inspect(stats)
+        # %{
+        #   avg_tokens: 412.5,
+        #   min_tokens: 89,
+        #   max_tokens: 501,
+        #   total_chunks: 3421
+        # }
+      end
+    end
+    ```
+    
+    **Ideal distribution**: Most chunks near target size, few outliers.
+  </Step>
+</Steps>
+
+## Common Pitfalls
+
+<Warning>
+**Avoid these mistakes**:
+
+1. **Chunks too small** (under 150 tokens)
+   - Missing context
+   - Related concepts split
+   - Too many chunks to search
+   
+2. **Chunks too large** (>1500 tokens)
+   - Low precision (too much irrelevant content)
+   - Fewer chunks fit in LLM context
+   - Slower embedding
+   
+3. **No overlap**
+   - Boundary concepts split
+   - Lower retrieval quality
+   
+4. **Too much overlap** (>25%)
+   - Redundant chunks
+   - Slower search
+   - Wasted storage
+   
+5. **Ignoring format**
+   - Code split mid-function
+   - Markdown structure lost
+   - Sections fragmented
+</Warning>
+
+## Best Practices Summary
+
+<CardGroup cols={2}>
+  <Card title="Use Format Hints" icon="file-code">
+    Always specify format for structured content:
+    
+    ```elixir
+    format: :markdown  # or :elixir, :python
+    ```
+  </Card>
+  
+  <Card title="Token-Based Sizing" icon="hashtag">
+    Use tokens (not characters) for LLM compatibility:
+    
+    ```elixir
+    size_unit: :tokens  # default
+    ```
+  </Card>
+  
+  <Card title="Test with Real Queries" icon="vial">
+    Evaluate chunking with actual search queries:
+    
+    ```elixir
+    Arcana.Evaluation.run(test_cases)
+    ```
+  </Card>
+  
+  <Card title="Monitor Statistics" icon="chart-line">
+    Track chunk size distribution and adjust:
+    
+    ```elixir
+    MyApp.ChunkStats.analyze(repo)
+    ```
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="RAG Pipeline" icon="diagram-project" href="/core-concepts/rag-pipeline">
+    See how chunking fits in the complete RAG workflow
+  </Card>
+  
+  <Card title="Embeddings" icon="brain" href="/core-concepts/embeddings">
+    Learn how chunks are converted to vector embeddings
+  </Card>
+  
+  <Card title="Search Modes" icon="magnifying-glass" href="/core-concepts/search-modes">
+    Understand how chunked content is searched
+  </Card>
+  
+  <Card title="Evaluation" icon="chart-line" href="/guides/evaluation">
+    Measure and optimize your chunking strategy
+  </Card>
+</CardGroup>

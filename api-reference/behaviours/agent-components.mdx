@@ -1,0 +1,735 @@
+---
+title: Agent Behaviours
+description: Behaviours for implementing custom Agent pipeline components
+---
+
+Arcana's Agent pipeline is fully pluggable. Every step can be replaced with a custom module or function implementing the corresponding behaviour.
+
+## Pipeline Overview
+
+The Agent pipeline processes questions through these steps:
+
+```elixir
+Agent.new(question, repo: repo, llm: llm)
+|> Agent.gate()         # Skip retrieval if answerable from knowledge
+|> Agent.rewrite()      # Clean conversational input
+|> Agent.select()       # Choose relevant collections
+|> Agent.expand()       # Add synonyms and related terms
+|> Agent.decompose()    # Split complex questions
+|> Agent.search()       # Execute vector search
+|> Agent.reason()       # Multi-hop: search again if needed
+|> Agent.rerank()       # Score and filter chunks
+|> Agent.answer()       # Generate final answer
+```
+
+Each step can use custom implementations:
+
+```elixir
+Agent.rewrite(ctx, rewriter: MyApp.CustomRewriter)
+Agent.search(ctx, searcher: MyApp.ElasticsearchSearcher)
+Agent.rerank(ctx, reranker: fn question, chunks, _opts ->
+  {:ok, my_reranking_logic(question, chunks)}
+end)
+```
+
+---
+
+## Arcana.Agent.Rewriter
+
+Transforms conversational input into clear search queries by removing filler phrases and greetings.
+
+### Required Callbacks
+
+#### rewrite/2
+
+Rewrites a conversational query into a search-optimized query.
+
+<ParamField path="question" type="String.t()" required>
+  The user's original question
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options from `Agent.rewrite/2` including:
+  - `:llm` - The LLM function for LLM-based rewriters
+  - `:prompt` - Custom prompt function
+  - Additional options passed to the step
+</ParamField>
+
+**Returns:** `{:ok, rewritten_query}` or `{:error, reason}`. On error, the original question is used.
+
+### Example: Regex Rewriter
+
+```elixir
+defmodule MyApp.RegexRewriter do
+  @behaviour Arcana.Agent.Rewriter
+
+  @impl true
+  def rewrite(question, _opts) do
+    cleaned =
+      question
+      |> String.replace(~r/^(hey|hi|hello)[,!]?\s*/i, "")
+      |> String.replace(~r/^(can you|could you|please)\s+/i, "")
+      |> String.replace(~r/^(tell me|show me|explain)\s+/i, "")
+      |> String.trim()
+
+    {:ok, cleaned}
+  end
+end
+
+# Usage
+Agent.rewrite(ctx, rewriter: MyApp.RegexRewriter)
+```
+
+### Example: LLM-Based Rewriter
+
+```elixir
+defmodule MyApp.LLMRewriter do
+  @behaviour Arcana.Agent.Rewriter
+
+  @impl true
+  def rewrite(question, opts) do
+    llm = Keyword.fetch!(opts, :llm)
+    
+    prompt = """
+    Rewrite this conversational question into a clear search query.
+    Remove greetings, filler words, and keep only the core question.
+    
+    Question: #{question}
+    
+    Search query:
+    """
+    
+    case Arcana.LLM.complete(llm, prompt, [], []) do
+      {:ok, rewritten} -> {:ok, String.trim(rewritten)}
+      error -> error
+    end
+  end
+end
+```
+
+---
+
+## Arcana.Agent.Selector
+
+Determines which collections to search based on the question and available collections.
+
+### Required Callbacks
+
+#### select/3
+
+Selects relevant collections for the given question.
+
+<ParamField path="question" type="String.t()" required>
+  The user's question
+</ParamField>
+
+<ParamField path="collections" type="[{String.t(), String.t() | nil}]" required>
+  List of `{name, description}` tuples for available collections
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options from `Agent.select/2` including:
+  - `:llm` - The LLM function for LLM-based selectors
+  - `:prompt` - Custom prompt function
+  - `:context` - User-provided context map
+  - Additional options passed to the step
+</ParamField>
+
+**Returns:** `{:ok, selected_collections, reasoning}` where `selected_collections` is a list of collection names and `reasoning` is an optional explanation string (can be nil). On error, returns `{:error, reason}` and falls back to all collections.
+
+### Example: Rule-Based Selector
+
+```elixir
+defmodule MyApp.TeamBasedSelector do
+  @behaviour Arcana.Agent.Selector
+
+  @impl true
+  def select(_question, _collections, opts) do
+    case opts[:context][:team] do
+      "api" -> 
+        {:ok, ["api-reference", "sdk-docs"], "API team routing"}
+      
+      "mobile" -> 
+        {:ok, ["mobile-docs", "react-native"], "Mobile team routing"}
+      
+      "sales" ->
+        {:ok, ["product-catalog", "pricing"], "Sales team routing"}
+      
+      _ -> 
+        {:ok, ["general"], "Default routing"}
+    end
+  end
+end
+
+# Usage
+Agent.select(ctx,
+  collections: available_collections,
+  selector: MyApp.TeamBasedSelector,
+  context: %{team: current_user.team}
+)
+```
+
+### Example: Keyword-Based Selector
+
+```elixir
+defmodule MyApp.KeywordSelector do
+  @behaviour Arcana.Agent.Selector
+
+  @impl true
+  def select(question, collections, _opts) do
+    # Map keywords to collections
+    selected =
+      cond do
+        question =~ ~r/\b(API|endpoint|SDK|integration)\b/i ->
+          ["api-docs", "integrations"]
+        
+        question =~ ~r/\b(price|cost|billing|payment)\b/i ->
+          ["pricing", "billing"]
+        
+        question =~ ~r/\b(deploy|hosting|server|infrastructure)\b/i ->
+          ["deployment", "infrastructure"]
+        
+        true ->
+          # Default: search all collections
+          Enum.map(collections, fn {name, _desc} -> name end)
+      end
+    
+    reasoning = "Selected based on keywords in question"
+    {:ok, selected, reasoning}
+  end
+end
+```
+
+---
+
+## Arcana.Agent.Expander
+
+Adds synonyms and related terms to improve document retrieval coverage.
+
+### Required Callbacks
+
+#### expand/2
+
+Expands a query with synonyms and related terms.
+
+<ParamField path="question" type="String.t()" required>
+  The query to expand
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options from `Agent.expand/2` including:
+  - `:llm` - The LLM function for LLM-based expanders
+  - `:prompt` - Custom prompt function
+  - Additional options passed to the step
+</ParamField>
+
+**Returns:** `{:ok, expanded_query}` or `{:error, reason}`. On error, the original question is used.
+
+### Example: Thesaurus Expander
+
+```elixir
+defmodule MyApp.ThesaurusExpander do
+  @behaviour Arcana.Agent.Expander
+
+  @synonyms %{
+    "ML" => ["machine learning", "AI", "artificial intelligence"],
+    "DB" => ["database", "data store"],
+    "API" => ["interface", "endpoint", "service"]
+  }
+
+  @impl true
+  def expand(question, _opts) do
+    expanded =
+      @synonyms
+      |> Enum.reduce(question, fn {abbr, synonyms}, acc ->
+        if String.contains?(acc, abbr) do
+          acc <> " " <> Enum.join(synonyms, " ")
+        else
+          acc
+        end
+      end)
+    
+    {:ok, expanded}
+  end
+end
+
+# Usage
+Agent.expand(ctx, expander: MyApp.ThesaurusExpander)
+```
+
+### Example: Domain-Specific Expander
+
+```elixir
+defmodule MyApp.TechExpander do
+  @behaviour Arcana.Agent.Expander
+
+  @impl true
+  def expand(question, _opts) do
+    # Add common technical terms
+    expanded =
+      question
+      |> add_programming_terms()
+      |> add_framework_names()
+    
+    {:ok, expanded}
+  end
+
+  defp add_programming_terms(text) do
+    cond do
+      text =~ ~r/\bfunction\b/i ->
+        text <> " method procedure subroutine"
+      
+      text =~ ~r/\bvariable\b/i ->
+        text <> " var const let parameter"
+      
+      true ->
+        text
+    end
+  end
+
+  defp add_framework_names(text) do
+    if text =~ ~r/\bPhoenix\b/i do
+      text <> " Elixir web framework"
+    else
+      text
+    end
+  end
+end
+```
+
+---
+
+## Arcana.Agent.Decomposer
+
+Breaks complex questions into simpler sub-questions for better retrieval.
+
+### Required Callbacks
+
+#### decompose/2
+
+Decomposes a complex question into simpler sub-questions.
+
+<ParamField path="question" type="String.t()" required>
+  The complex question to decompose
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options from `Agent.decompose/2` including:
+  - `:llm` - The LLM function for LLM-based decomposers
+  - `:prompt` - Custom prompt function
+  - Additional options passed to the step
+</ParamField>
+
+**Returns:** `{:ok, sub_questions}` where `sub_questions` is a list of strings, or `{:error, reason}`. On error, returns the original question as a single-item list.
+
+### Example: Keyword-Based Decomposer
+
+```elixir
+defmodule MyApp.KeywordDecomposer do
+  @behaviour Arcana.Agent.Decomposer
+
+  @impl true
+  def decompose(question, _opts) do
+    # Split on conjunctions
+    sub_questions =
+      question
+      |> String.split(~r/\s+(and|vs|versus|compared to|or)\s+/i)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&ensure_question/1)
+    
+    {:ok, sub_questions}
+  end
+
+  defp ensure_question(text) do
+    if String.ends_with?(text, "?") do
+      text
+    else
+      text <> "?"
+    end
+  end
+end
+```
+
+### Example: LLM-Based Decomposer
+
+```elixir
+defmodule MyApp.LLMDecomposer do
+  @behaviour Arcana.Agent.Decomposer
+
+  @impl true
+  def decompose(question, opts) do
+    llm = Keyword.fetch!(opts, :llm)
+    
+    prompt = """
+    Break this complex question into 2-3 simpler sub-questions.
+    Each sub-question should be independently answerable.
+    
+    Question: #{question}
+    
+    Sub-questions (one per line):
+    """
+    
+    case Arcana.LLM.complete(llm, prompt, [], []) do
+      {:ok, response} ->
+        sub_questions =
+          response
+          |> String.split("\n")
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+        
+        {:ok, sub_questions}
+      
+      error -> error
+    end
+  end
+end
+```
+
+---
+
+## Arcana.Agent.Searcher
+
+Retrieves relevant chunks from a knowledge base. Allows swapping Arcana's built-in search for any search backend.
+
+### Required Callbacks
+
+#### search/3
+
+Searches for relevant chunks matching the question.
+
+<ParamField path="question" type="String.t()" required>
+  The search query
+</ParamField>
+
+<ParamField path="collection" type="String.t()" required>
+  The collection name to search in
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options from `Agent.search/2` including:
+  - `:repo` - The Ecto repo (for database-backed searchers)
+  - `:limit` - Maximum chunks to return (default: 5)
+  - `:threshold` - Minimum similarity threshold (default: 0.5)
+  - Additional options passed to the step
+</ParamField>
+
+**Returns:** `{:ok, chunks}` where chunks is a list of maps with `:id`, `:text`, `:metadata`, and `:similarity` keys, or `{:error, reason}`.
+
+### Chunk Format
+
+Each chunk must be a map with:
+
+- `:id` - Unique identifier
+- `:text` - The chunk text content
+- `:metadata` - Optional metadata map
+- `:similarity` - Similarity score (0.0-1.0)
+
+### Example: Elasticsearch Searcher
+
+```elixir
+defmodule MyApp.ElasticsearchSearcher do
+  @behaviour Arcana.Agent.Searcher
+
+  @impl true
+  def search(question, collection, opts) do
+    limit = Keyword.get(opts, :limit, 5)
+    
+    # Build Elasticsearch query
+    query = %{
+      "size" => limit,
+      "query" => %{
+        "multi_match" => %{
+          "query" => question,
+          "fields" => ["text^2", "metadata.title"]
+        }
+      }
+    }
+    
+    case Elastix.Search.search("http://localhost:9200", collection, [], query) do
+      {:ok, %{"hits" => %{"hits" => hits}}} ->
+        chunks = Enum.map(hits, &to_chunk/1)
+        {:ok, chunks}
+      
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp to_chunk(hit) do
+    %{
+      id: hit["_id"],
+      text: hit["_source"]["text"],
+      metadata: hit["_source"]["metadata"] || %{},
+      similarity: normalize_score(hit["_score"])
+    }
+  end
+
+  defp normalize_score(score) do
+    # Convert Elasticsearch score to 0.0-1.0 range
+    min(1.0, score / 10.0)
+  end
+end
+```
+
+### Example: Hybrid Searcher
+
+```elixir
+defmodule MyApp.HybridSearcher do
+  @behaviour Arcana.Agent.Searcher
+
+  @impl true
+  def search(question, collection, opts) do
+    limit = Keyword.get(opts, :limit, 5)
+    
+    # Get results from multiple sources
+    vector_results = vector_search(question, collection, limit)
+    fulltext_results = fulltext_search(question, collection, limit)
+    graph_results = graph_search(question, collection, limit)
+    
+    # Combine with Reciprocal Rank Fusion
+    combined = reciprocal_rank_fusion([
+      vector_results,
+      fulltext_results,
+      graph_results
+    ])
+    
+    # Take top results
+    {:ok, Enum.take(combined, limit)}
+  end
+
+  defp reciprocal_rank_fusion(result_lists) do
+    # RRF implementation
+    # ... combine and rank results ...
+  end
+end
+```
+
+---
+
+## Arcana.Agent.Reranker
+
+Scores and filters chunks based on relevance to improve retrieval quality.
+
+### Required Callbacks
+
+#### rerank/3
+
+Re-ranks chunks based on relevance to the question.
+
+<ParamField path="question" type="String.t()" required>
+  The search query
+</ParamField>
+
+<ParamField path="chunks" type="[map()]" required>
+  List of chunk maps from search
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options from `Agent.rerank/2` including:
+  - `:threshold` - Minimum score to keep (default: 7, range 0-10)
+  - `:llm` - LLM function for LLM-based rerankers
+  - `:prompt` - Custom prompt function
+  - Additional options passed to the step
+</ParamField>
+
+**Returns:** `{:ok, reranked_chunks}` where chunks are filtered and sorted by score (highest first), or `{:error, reason}`.
+
+### Example: Cross-Encoder Reranker
+
+```elixir
+defmodule MyApp.CrossEncoderReranker do
+  @behaviour Arcana.Agent.Reranker
+
+  @impl true
+  def rerank(question, chunks, opts) do
+    threshold = Keyword.get(opts, :threshold, 0.5)
+    
+    # Score each chunk with cross-encoder model
+    scored =
+      chunks
+      |> Enum.map(fn chunk ->
+        score = score_relevance(question, chunk.text)
+        Map.put(chunk, :score, score)
+      end)
+      |> Enum.filter(fn chunk -> chunk.score >= threshold end)
+      |> Enum.sort_by(fn chunk -> chunk.score end, :desc)
+    
+    {:ok, scored}
+  end
+
+  defp score_relevance(question, text) do
+    # Use your cross-encoder model
+    # Returns score between 0.0 and 1.0
+    MyApp.CrossEncoder.score_pair(question, text)
+  end
+end
+```
+
+### Example: ColBERT Reranker
+
+```elixir
+defmodule MyApp.ColBERTReranker do
+  @behaviour Arcana.Agent.Reranker
+
+  @impl true
+  def rerank(question, chunks, opts) do
+    threshold = Keyword.get(opts, :threshold, 7.0)
+    
+    # Get token-level embeddings
+    query_embeddings = embed_tokens(question)
+    
+    scored =
+      chunks
+      |> Enum.map(fn chunk ->
+        doc_embeddings = embed_tokens(chunk.text)
+        score = colbert_score(query_embeddings, doc_embeddings)
+        Map.put(chunk, :score, score)
+      end)
+      |> Enum.filter(fn chunk -> chunk.score >= threshold end)
+      |> Enum.sort_by(fn chunk -> chunk.score end, :desc)
+    
+    {:ok, scored}
+  end
+
+  defp colbert_score(query_embs, doc_embs) do
+    # MaxSim operation: for each query token,
+    # find max similarity with any doc token
+    # ... implementation ...
+  end
+end
+```
+
+---
+
+## Arcana.Agent.Answerer
+
+Generates the final answer based on the question and retrieved context.
+
+### Required Callbacks
+
+#### answer/3
+
+Generates an answer based on the question and context chunks.
+
+<ParamField path="question" type="String.t()" required>
+  The user's original question
+</ParamField>
+
+<ParamField path="chunks" type="[map()]" required>
+  List of context chunks retrieved by search
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options from `Agent.answer/2` including:
+  - `:llm` - The LLM function for LLM-based answerers
+  - `:prompt` - Custom prompt function `fn question, chunks -> prompt end`
+  - Additional options passed to the step
+</ParamField>
+
+**Returns:** `{:ok, answer}` where answer is a string, or `{:error, reason}`.
+
+### Example: Template-Based Answerer
+
+```elixir
+defmodule MyApp.TemplateAnswerer do
+  @behaviour Arcana.Agent.Answerer
+
+  @impl true
+  def answer(question, chunks, _opts) do
+    if Enum.empty?(chunks) do
+      answer = "I couldn't find relevant information to answer that question."
+      {:ok, answer}
+    else
+      context = Enum.map_join(chunks, "\n\n", & &1.text)
+      
+      answer = """
+      Based on #{length(chunks)} sources:
+      
+      #{context}
+      
+      To answer your question: #{question}
+      """
+      
+      {:ok, answer}
+    end
+  end
+end
+```
+
+### Example: Structured Answerer
+
+```elixir
+defmodule MyApp.StructuredAnswerer do
+  @behaviour Arcana.Agent.Answerer
+
+  @impl true
+  def answer(question, chunks, opts) do
+    llm = Keyword.fetch!(opts, :llm)
+    
+    # Build structured prompt
+    sources = format_sources(chunks)
+    
+    prompt = """
+    Answer the question using ONLY the provided sources.
+    Structure your answer as:
+    
+    1. Direct answer (2-3 sentences)
+    2. Supporting details
+    3. Sources used (list by number)
+    
+    Sources:
+    #{sources}
+    
+    Question: #{question}
+    
+    Answer:
+    """
+    
+    case Arcana.LLM.complete(llm, prompt, [], []) do
+      {:ok, answer} -> {:ok, String.trim(answer)}
+      error -> error
+    end
+  end
+
+  defp format_sources(chunks) do
+    chunks
+    |> Enum.with_index(1)
+    |> Enum.map_join("\n\n", fn {chunk, idx} ->
+      "[#{idx}] #{chunk.text}"
+    end)
+  end
+end
+```
+
+---
+
+## Complete Custom Pipeline Example
+
+Here's a complete example using all custom components:
+
+```elixir
+alias Arcana.Agent
+
+ctx =
+  Agent.new("Compare Elixir and Erlang", repo: MyApp.Repo, llm: llm)
+  |> Agent.rewrite(rewriter: MyApp.RegexRewriter)
+  |> Agent.select(
+    collections: available_collections,
+    selector: MyApp.TeamBasedSelector,
+    context: %{team: "engineering"}
+  )
+  |> Agent.expand(expander: MyApp.ThesaurusExpander)
+  |> Agent.decompose(decomposer: MyApp.KeywordDecomposer)
+  |> Agent.search(searcher: MyApp.ElasticsearchSearcher)
+  |> Agent.rerank(reranker: MyApp.CrossEncoderReranker, threshold: 0.7)
+  |> Agent.answer(answerer: MyApp.StructuredAnswerer)
+
+ctx.answer
+# => "Based on 5 sources:\n1. Direct answer...\n2. Supporting details...\n3. Sources used: [1], [3], [4]"
+```
+
+## See Also
+
+- [Agentic RAG Guide](/guides/agentic-rag) - Complete guide to building Agent pipelines
+- [Arcana.Agent](/api-reference/agent) - Agent API reference

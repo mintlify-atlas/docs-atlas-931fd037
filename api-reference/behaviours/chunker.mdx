@@ -1,0 +1,330 @@
+---
+title: Arcana.Chunker
+description: Behaviour for implementing custom text chunking strategies
+---
+
+The `Arcana.Chunker` behaviour allows you to implement custom text chunking strategies. Arcana ships with a default implementation using the `text_chunker` library, but you can create chunkers that split text based on semantic boundaries, document structure, or any custom logic.
+
+## Required Callbacks
+
+### chunk/2
+
+Splits text into chunks suitable for embedding and retrieval.
+
+<ParamField path="text" type="String.t()" required>
+  The text to split into chunks
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options passed from configuration or at call time. Common options:
+  - `:chunk_size` - Maximum chunk size (default varies by implementation)
+  - `:chunk_overlap` - Overlap between consecutive chunks
+  - `:format` - Text format hint (`:plaintext`, `:markdown`, `:elixir`, etc.)
+  - `:size_unit` - How to measure size: `:characters` or `:tokens`
+</ParamField>
+
+**Returns:** A list of chunk maps, each containing:
+- `:text` - The chunk text content (required)
+- `:chunk_index` - Zero-based index of this chunk (required)
+- `:token_count` - Estimated token count (required)
+- Additional keys may be included and will be passed through to storage
+
+## Configuration
+
+Configure your chunker in `config/config.exs`:
+
+```elixir
+# Built-in: Default text chunker
+config :arcana, chunker: :default
+config :arcana, chunker: {:default, chunk_size: 512, chunk_overlap: 100}
+
+# Custom module
+config :arcana, chunker: MyApp.SemanticChunker
+config :arcana, chunker: {MyApp.SemanticChunker, model: "..."}
+
+# Custom function
+config :arcana, chunker: fn text, opts -> 
+  [%{text: text, chunk_index: 0, token_count: 10}]
+end
+```
+
+## Implementation Examples
+
+### Semantic Chunking
+
+Split text based on semantic boundaries using sentence embeddings:
+
+```elixir
+defmodule MyApp.SemanticChunker do
+  @behaviour Arcana.Chunker
+
+  @impl true
+  def chunk(text, opts) do
+    max_tokens = Keyword.get(opts, :chunk_size, 450)
+    
+    # Split into sentences
+    sentences = split_sentences(text)
+    
+    # Embed each sentence
+    embeddings = Enum.map(sentences, &embed_sentence/1)
+    
+    # Group sentences with high semantic similarity
+    chunks = group_by_similarity(sentences, embeddings, max_tokens)
+    
+    # Format as chunk maps
+    chunks
+    |> Enum.with_index()
+    |> Enum.map(fn {chunk_text, index} ->
+      %{
+        text: chunk_text,
+        chunk_index: index,
+        token_count: estimate_tokens(chunk_text)
+      }
+    end)
+  end
+
+  defp split_sentences(text) do
+    # Use regex or NLP library to split on sentence boundaries
+    text
+    |> String.split(~r/[.!?]\s+/)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp embed_sentence(sentence) do
+    # Use lightweight sentence embedder
+    {:ok, embedding} = MyApp.SentenceEmbedder.embed(sentence)
+    embedding
+  end
+
+  defp group_by_similarity(sentences, embeddings, max_tokens) do
+    # Group consecutive sentences if they're semantically similar
+    # and under max_tokens threshold
+    # ... implementation details ...
+  end
+
+  defp estimate_tokens(text) do
+    max(1, div(String.length(text), 4))
+  end
+end
+```
+
+### Document Structure Chunking
+
+Split Markdown based on document structure:
+
+```elixir
+defmodule MyApp.MarkdownChunker do
+  @behaviour Arcana.Chunker
+
+  @impl true
+  def chunk(text, opts) do
+    max_tokens = Keyword.get(opts, :chunk_size, 450)
+    overlap = Keyword.get(opts, :chunk_overlap, 50)
+    
+    # Parse markdown into sections by headers
+    sections = parse_markdown_sections(text)
+    
+    # Split large sections
+    chunks =
+      Enum.flat_map(sections, fn section ->
+        if section.token_count > max_tokens do
+          split_section(section, max_tokens, overlap)
+        else
+          [section]
+        end
+      end)
+    
+    # Add chunk indices
+    chunks
+    |> Enum.with_index()
+    |> Enum.map(fn {chunk, index} ->
+      Map.put(chunk, :chunk_index, index)
+    end)
+  end
+
+  defp parse_markdown_sections(text) do
+    # Split by markdown headers (##, ###, etc.)
+    text
+    |> String.split(~r/^#{1,6}\s+/m)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(fn section_text ->
+      %{
+        text: String.trim(section_text),
+        token_count: estimate_tokens(section_text),
+        chunk_index: 0  # Will be updated later
+      }
+    end)
+  end
+
+  defp split_section(section, max_tokens, overlap) do
+    # Split large sections into smaller chunks with overlap
+    # ... implementation details ...
+  end
+
+  defp estimate_tokens(text) do
+    max(1, div(String.length(text), 4))
+  end
+end
+```
+
+### Keyword-Based Chunking
+
+Split based on topic keywords:
+
+```elixir
+defmodule MyApp.KeywordChunker do
+  @behaviour Arcana.Chunker
+
+  @impl true
+  def chunk(text, opts) do
+    keywords = Keyword.get(opts, :keywords, [])
+    max_tokens = Keyword.get(opts, :chunk_size, 450)
+    
+    # Split text on keyword boundaries
+    chunks =
+      if Enum.empty?(keywords) do
+        # Fall back to simple splitting
+        simple_chunk(text, max_tokens)
+      else
+        # Split on keyword occurrences
+        split_on_keywords(text, keywords, max_tokens)
+      end
+    
+    # Add metadata
+    chunks
+    |> Enum.with_index()
+    |> Enum.map(fn {chunk_text, index} ->
+      %{
+        text: chunk_text,
+        chunk_index: index,
+        token_count: estimate_tokens(chunk_text),
+        keywords: extract_keywords(chunk_text, keywords)
+      }
+    end)
+  end
+
+  defp split_on_keywords(text, keywords, max_tokens) do
+    # Split text where keywords appear
+    # ... implementation details ...
+  end
+
+  defp extract_keywords(text, keywords) do
+    keywords
+    |> Enum.filter(fn keyword ->
+      String.contains?(String.downcase(text), String.downcase(keyword))
+    end)
+  end
+
+  defp estimate_tokens(text) do
+    max(1, div(String.length(text), 4))
+  end
+end
+```
+
+## Built-in Implementation: Default Chunker
+
+The built-in default chunker uses the `text_chunker` library:
+
+```elixir
+defmodule Arcana.Chunker.Default do
+  @behaviour Arcana.Chunker
+
+  @default_chunk_size 450
+  @default_chunk_overlap 50
+  @default_format :plaintext
+  @default_size_unit :tokens
+
+  @impl true
+  def chunk(text, opts \\ [])
+
+  def chunk("", _opts), do: []
+
+  def chunk(text, opts) do
+    chunk_size = Keyword.get(opts, :chunk_size, @default_chunk_size)
+    chunk_overlap = Keyword.get(opts, :chunk_overlap, @default_chunk_overlap)
+    format = Keyword.get(opts, :format, @default_format)
+    size_unit = Keyword.get(opts, :size_unit, @default_size_unit)
+
+    # Convert token-based sizes to character-based
+    {effective_chunk_size, effective_overlap} =
+      case size_unit do
+        :tokens -> {chunk_size * 4, chunk_overlap * 4}
+        :characters -> {chunk_size, chunk_overlap}
+      end
+
+    text_chunker_opts = [
+      chunk_size: effective_chunk_size,
+      chunk_overlap: effective_overlap,
+      format: format
+    ]
+
+    text
+    |> TextChunker.split(text_chunker_opts)
+    |> Enum.map(& &1.text)
+    |> Enum.reject(&blank?/1)
+    |> Enum.with_index()
+    |> Enum.map(fn {text, index} ->
+      %{
+        text: text,
+        chunk_index: index,
+        token_count: estimate_tokens(text)
+      }
+    end)
+  end
+
+  defp estimate_tokens(text) do
+    # Rough estimate: ~4 chars per token for English
+    max(1, div(String.length(text), 4))
+  end
+end
+```
+
+## Usage in Code
+
+You can override the configured chunker at call time:
+
+```elixir
+# Use global config
+Arcana.ingest(text, repo: MyApp.Repo)
+
+# Override with custom chunker
+Arcana.ingest(text,
+  repo: MyApp.Repo,
+  chunker: {MyApp.SemanticChunker, model: "sentence-transformers"}
+)
+
+# Override with custom options
+Arcana.ingest(markdown_text,
+  repo: MyApp.Repo,
+  chunker: {:default, chunk_size: 512, format: :markdown}
+)
+```
+
+## Chunk Format Requirements
+
+Every chunk map must include:
+
+1. **`:text`** (String.t()) - The chunk text content
+2. **`:chunk_index`** (integer) - Zero-based index (0, 1, 2, ...)
+3. **`:token_count`** (integer) - Estimated token count
+
+You can add additional keys for metadata:
+
+```elixir
+%{
+  text: "chunk content",
+  chunk_index: 0,
+  token_count: 45,
+  # Additional metadata
+  section: "Introduction",
+  keywords: ["elixir", "programming"],
+  importance: 0.8
+}
+```
+
+This metadata is stored alongside the chunk and returned in search results.
+
+## See Also
+
+- [Arcana.Embedder](/api-reference/behaviours/embedder) - Embedding behaviour
+- [Arcana.VectorStore](/api-reference/behaviours/vector-store) - Vector storage behaviour

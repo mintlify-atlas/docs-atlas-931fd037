@@ -1,0 +1,467 @@
+---
+title: Community Detection
+description: Detecting and summarizing entity communities with the Leiden algorithm
+---
+
+## Overview
+
+Community detection groups related entities into **clusters** based on their relationship patterns. Communities help answer **global questions** that require understanding broad themes rather than specific facts.
+
+For example:
+- "What are the main topics in this knowledge base?"
+- "Tell me about the AI research ecosystem"
+- "Summarize the key companies in fintech"
+
+Arcana uses the **Leiden algorithm** - a state-of-the-art community detection method that guarantees well-connected communities.
+
+## How Community Detection Works
+
+After building the entity graph, communities are detected:
+
+```elixir
+# 1. Graph built from entities and relationships
+entities = [
+  %{id: "e1", name: "Sam Altman", type: "person"},
+  %{id: "e2", name: "OpenAI", type: "organization"},
+  %{id: "e3", name: "GPT-4", type: "technology"},
+  %{id: "e4", name: "Microsoft", type: "organization"},
+  %{id: "e5", name: "Azure", type: "technology"}
+]
+
+relationships = [
+  %{source_id: "e1", target_id: "e2", strength: 10},  # Sam -> OpenAI
+  %{source_id: "e2", target_id: "e3", strength: 9},   # OpenAI -> GPT-4
+  %{source_id: "e2", target_id: "e4", strength: 8},   # OpenAI -> Microsoft
+  %{source_id: "e4", target_id: "e5", strength: 9}    # Microsoft -> Azure
+]
+
+# 2. Detect communities
+detector = {Arcana.Graph.CommunityDetector.Leiden, resolution: 1.0}
+{:ok, communities} = Arcana.Graph.CommunityDetector.detect(
+  detector,
+  entities,
+  relationships
+)
+
+# Result: Hierarchical communities
+[
+  # Level 0 (finest granularity)
+  %{level: 0, entity_ids: ["e1", "e2", "e3"]},  # AI/OpenAI community
+  %{level: 0, entity_ids: ["e4", "e5"]},        # Microsoft/Cloud community
+  
+  # Level 1 (coarser)
+  %{level: 1, entity_ids: ["e1", "e2", "e3", "e4", "e5"]}  # Tech ecosystem
+]
+
+# 3. Generate summaries for each community
+summarizer = {Arcana.Graph.CommunitySummarizer.LLM, llm: &MyApp.llm/3}
+{:ok, summary} = Arcana.Graph.CommunitySummarizer.summarize(
+  entities_in_community,
+  relationships_in_community,
+  community_summarizer: summarizer
+)
+
+# => "This community represents the OpenAI ecosystem, including 
+#     Sam Altman (CEO), GPT-4 (flagship product), and their 
+#     partnership with Microsoft."
+```
+
+See implementation in `lib/arcana/graph/community_detector/leiden.ex:48`
+
+## Leiden Algorithm
+
+### What is Leiden?
+
+The Leiden algorithm is an improvement over the popular Louvain algorithm for community detection. It:
+
+1. **Optimizes modularity** - Maximizes connections within communities, minimizes connections between
+2. **Guarantees connectivity** - All entities in a community are reachable from each other
+3. **Produces hierarchies** - Multiple levels from fine-grained to coarse clusters
+4. **Scales efficiently** - Handles large graphs (10,000+ nodes) quickly
+
+### Installation
+
+Community detection requires the `leidenfold` library (Rust NIF):
+
+```elixir
+# mix.exs
+defp deps do
+  [
+    {:arcana, "~> 1.2"},
+    {:leidenfold, "~> 0.2"}
+  ]
+end
+```
+
+Precompiled binaries are available for:
+- macOS (Apple Silicon)
+- Linux (x86_64, ARM64)
+
+See `lib/arcana/graph/community_detector/leiden.ex:11`
+
+### Configuration
+
+```elixir
+config :arcana, :graph,
+  community_detector: {Arcana.Graph.CommunityDetector.Leiden,
+    resolution: 1.0,       # Higher = smaller communities
+    objective: :cpm,       # Quality function
+    iterations: 2,         # Optimization iterations
+    min_size: 2,           # Exclude singleton communities
+    max_level: 3           # Hierarchy depth
+  }
+```
+
+### Options
+
+**`:resolution`** (float, default: 1.0)
+- Controls community granularity
+- Higher values → smaller, more focused communities
+- Lower values → larger, broader communities
+- Typical range: 0.5 - 2.0
+
+**`:objective`** (atom, default: `:cpm`)
+- Quality function to optimize
+- Options:
+  - `:cpm` - Constant Potts Model (recommended)
+  - `:modularity` - Classic modularity measure
+  - `:rber` - Reichardt-Bornholdt with Erdős-Rényi null model
+  - `:rbc` - Reichardt-Bornholdt with configuration null model
+  - `:significance` - Statistical significance
+  - `:surprise` - Surprise measure
+
+**`:iterations`** (integer, default: 2)
+- Number of optimization passes
+- More iterations = better quality, longer runtime
+- Typical range: 1-5
+
+**`:min_size`** (integer, default: 1)
+- Minimum entities per community
+- Set to 2 to exclude singleton communities
+- Set to 3+ for more substantial clusters
+
+**`:max_level`** (integer, default: 1)
+- Maximum hierarchy levels
+- Level 0 = finest granularity
+- Higher levels = coarser aggregations
+- Typical range: 1-5
+
+**`:seed`** (integer, default: 0)
+- Random seed for reproducibility
+- 0 = random seed each run
+- Set specific value for deterministic results
+
+See options in `lib/arcana/graph/community_detector/leiden.ex:30`
+
+## Community Summarization
+
+### LLM Summarizer (Default)
+
+Generates natural language summaries of communities using LLMs.
+
+**Configuration:**
+```elixir
+config :arcana, :graph,
+  community_summarizer: {Arcana.Graph.CommunitySummarizer.LLM, []}
+```
+
+**Example:**
+```elixir
+entities = [
+  %{name: "Sam Altman", type: "person", description: "CEO of OpenAI"},
+  %{name: "OpenAI", type: "organization", description: "AI research company"},
+  %{name: "GPT-4", type: "technology", description: "Large language model"}
+]
+
+relationships = [
+  %{source: "Sam Altman", target: "OpenAI", type: "LEADS"},
+  %{source: "OpenAI", target: "GPT-4", type: "DEVELOPED"}
+]
+
+summarizer = {Arcana.Graph.CommunitySummarizer.LLM, llm: &MyApp.llm/3}
+{:ok, summary} = Arcana.Graph.CommunitySummarizer.summarize(
+  entities,
+  relationships,
+  community_summarizer: summarizer
+)
+
+# => "This community represents the OpenAI ecosystem centered around 
+#     Sam Altman's leadership. OpenAI developed GPT-4, a flagship 
+#     large language model that represents their core AI research."
+```
+
+See `lib/arcana/graph/community_summarizer.ex:84`
+
+### Summary Format
+
+Good summaries should (2-5 sentences):
+1. **Identify the theme** - What domain/topic does this community represent?
+2. **Name key entities** - Who/what are the most important members?
+3. **Describe relationships** - How are entities connected?
+4. **Provide context** - Why is this community significant?
+
+### Summary Regeneration
+
+Communities are marked "dirty" when modified and need re-summarization:
+
+```elixir
+# Check if summary needs regeneration
+if CommunitySummarizer.needs_regeneration?(community, threshold: 10) do
+  # Regenerate summary
+  {:ok, summary} = CommunitySummarizer.summarize(entities, relationships, opts)
+  
+  # Update community
+  community
+  |> Community.changeset(%{
+    summary: summary,
+    change_count: 0,
+    dirty: false
+  })
+  |> Repo.update()
+end
+```
+
+See `lib/arcana/graph/community_summarizer.ex:140`
+
+## Custom Detectors
+
+Implement the `Arcana.Graph.CommunityDetector` behaviour:
+
+```elixir
+defmodule MyApp.LouvainDetector do
+  @behaviour Arcana.Graph.CommunityDetector
+
+  @impl true
+  def detect(entities, relationships, opts) do
+    resolution = Keyword.get(opts, :resolution, 1.0)
+    
+    # Build graph
+    graph = build_graph(entities, relationships)
+    
+    # Run Louvain algorithm
+    communities = run_louvain(graph, resolution)
+    
+    # Format as community maps
+    formatted =
+      communities
+      |> Enum.map(fn {level, entity_ids} ->
+        %{level: level, entity_ids: entity_ids}
+      end)
+    
+    {:ok, formatted}
+  end
+
+  defp build_graph(entities, relationships) do
+    # Build adjacency list
+  end
+
+  defp run_louvain(graph, resolution) do
+    # Run Louvain community detection
+  end
+end
+```
+
+**Configure:**
+```elixir
+config :arcana, :graph,
+  community_detector: {MyApp.LouvainDetector, resolution: 0.8}
+```
+
+See behaviour definition in `lib/arcana/graph/community_detector.ex:76`
+
+## Custom Summarizers
+
+Implement the `Arcana.Graph.CommunitySummarizer` behaviour:
+
+```elixir
+defmodule MyApp.ExtractiveSummarizer do
+  @behaviour Arcana.Graph.CommunitySummarizer
+
+  @impl true
+  def summarize(entities, relationships, opts) do
+    max_sentences = Keyword.get(opts, :max_sentences, 3)
+    
+    # Extract key sentences from entity descriptions
+    sentences =
+      entities
+      |> Enum.filter(&Map.has_key?(&1, :description))
+      |> Enum.map(& &1.description)
+      |> score_sentences(relationships)
+      |> Enum.take(max_sentences)
+      |> Enum.join(" ")
+    
+    {:ok, sentences}
+  end
+
+  defp score_sentences(descriptions, relationships) do
+    # Score by entity importance (degree centrality)
+    # Return sorted by score
+  end
+end
+```
+
+**Configure:**
+```elixir
+config :arcana, :graph,
+  community_summarizer: {MyApp.ExtractiveSummarizer, max_sentences: 5}
+```
+
+See behaviour definition in `lib/arcana/graph/community_summarizer.ex:74`
+
+## Real Examples from Source
+
+### Example 1: Leiden Detection
+
+From `lib/arcana/graph/community_detector/leiden.ex:50`:
+
+```elixir
+def detect(entities, relationships, opts) do
+  resolution = Keyword.get(opts, :resolution, 1.0)
+  objective = Keyword.get(opts, :objective, :cpm)
+  iterations = Keyword.get(opts, :iterations, 2)
+  seed = Keyword.get(opts, :seed, 0)
+  min_size = Keyword.get(opts, :min_size, 1)
+  max_level = Keyword.get(opts, :max_level, 1)
+
+  # Build index mappings: entity IDs -> integer indices
+  entity_ids = Enum.map(entities, & &1.id)
+  id_to_index = entity_ids |> Enum.with_index() |> Map.new()
+  index_to_id = entity_ids |> Enum.with_index() |> Map.new(fn {id, idx} -> {idx, id} end)
+
+  # Convert relationships to weighted edges
+  edges = to_weighted_edges(id_to_index, relationships)
+
+  leiden_opts = [
+    n_nodes: length(entity_ids),
+    objective: objective,
+    resolution: resolution,
+    iterations: iterations,
+    seed: seed,
+    max_levels: max_level,
+    min_size: min_size
+  ]
+
+  # Run Leiden via Rust NIF
+  case Leidenfold.detect_hierarchical_from_weighted_edges(edges, leiden_opts) do
+    {:ok, levels} ->
+      communities = format_hierarchical_levels(levels, index_to_id, min_size)
+      {:ok, communities}
+    
+    {:error, reason} ->
+      {:error, reason}
+  end
+end
+```
+
+### Example 2: Edge Conversion
+
+From `lib/arcana/graph/community_detector/leiden.ex:123`:
+
+```elixir
+defp to_weighted_edges(id_to_index, relationships) do
+  relationships
+  |> Enum.filter(fn rel ->
+    # Only include edges where both nodes exist
+    Map.has_key?(id_to_index, rel.source_id) and
+      Map.has_key?(id_to_index, rel.target_id)
+  end)
+  |> Enum.map(fn rel ->
+    source_idx = Map.fetch!(id_to_index, rel.source_id)
+    target_idx = Map.fetch!(id_to_index, rel.target_id)
+    # Use relationship strength as edge weight (default: 1)
+    weight = (Map.get(rel, :strength, 1) || 1) / 1
+    {source_idx, target_idx, weight}
+  end)
+end
+```
+
+### Example 3: Hierarchy Formatting
+
+From `lib/arcana/graph/community_detector/leiden.ex:138`:
+
+```elixir
+defp format_hierarchical_levels(levels, index_to_id, min_size) do
+  Enum.flat_map(levels, fn %{level: level, membership: membership} ->
+    format_communities(membership, index_to_id, level, min_size)
+  end)
+end
+
+defp format_communities(membership, index_to_id, level, min_size) do
+  # membership[node_idx] = community_id
+  membership
+  |> Enum.with_index()
+  |> Enum.group_by(
+    fn {community_id, _node_idx} -> community_id end,
+    fn {_community_id, node_idx} -> Map.fetch!(index_to_id, node_idx) end
+  )
+  |> Enum.map(fn {_community_id, entity_ids} ->
+    %{level: level, entity_ids: entity_ids}
+  end)
+  |> Enum.filter(fn %{entity_ids: ids} -> length(ids) >= min_size end)
+end
+```
+
+### Example 4: Needs Regeneration Check
+
+From `lib/arcana/graph/community_summarizer.ex:142`:
+
+```elixir
+def needs_regeneration?(community, opts) do
+  threshold = Keyword.get(opts, :threshold, 10)
+
+  cond do
+    Map.get(community, :dirty, false) -> true          # Explicitly marked dirty
+    is_nil(Map.get(community, :summary)) -> true       # No summary exists
+    Map.get(community, :change_count, 0) >= threshold -> true  # Too many changes
+    true -> false
+  end
+end
+```
+
+## Using Communities in Search
+
+Communities enable **global queries** that need broad context:
+
+```elixir
+# Get top-level community summaries for context
+summaries = Arcana.Graph.community_summaries(graph, level: 0)
+
+# Use summaries as context for LLM
+context = Enum.map_join(summaries, "\n\n", fn comm ->
+  "## Community #{comm.id}\n#{comm.summary}"
+end)
+
+prompt = """
+Context (community summaries):
+#{context}
+
+Question: What are the main AI companies in this knowledge base?
+"""
+```
+
+See `lib/arcana/graph/graph_query.ex:166`
+
+## Performance Considerations
+
+**Leiden Detection:**
+- Small graphs (< 100 nodes): ~10-50ms
+- Medium graphs (100-1000 nodes): ~50-500ms
+- Large graphs (1000-10000 nodes): ~500-5000ms
+- Scales approximately O(n log n)
+
+**Memory Usage:**
+- ~1-5MB per 1000 nodes
+- Edge-weighted graphs use more memory
+
+**Optimization Tips:**
+1. Run detection asynchronously during ingest
+2. Cache community assignments
+3. Regenerate summaries only when `needs_regeneration?` is true
+4. Use higher `min_size` to reduce number of communities
+5. Limit `max_level` to reduce hierarchy depth
+
+## Next Steps
+
+- [Search](/api-reference/graph/search) - Use communities in graph search
+- [Relationships](/api-reference/graph/relationships) - Communities are built from relationships
+- [GraphRAG Overview](/api-reference/graph/overview) - Understand the full pipeline

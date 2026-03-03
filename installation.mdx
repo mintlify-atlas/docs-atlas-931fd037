@@ -1,0 +1,553 @@
+---
+title: Installation
+description: Install and configure Arcana in your Phoenix application with PostgreSQL, pgvector, and embeddings
+---
+
+# Installation
+
+Arcana requires PostgreSQL with the pgvector extension and an Nx backend for local embeddings. This guide covers installation with Igniter (recommended) and manual setup.
+
+## Prerequisites
+
+- Elixir 1.14+ and Phoenix 1.7+
+- PostgreSQL 12+ with pgvector extension
+- An Nx backend (EXLA, EMLX, or Torchx) for local embeddings
+
+## Installation Methods
+
+<Tabs>
+  <Tab title="With Igniter (Recommended)">
+    
+### Install with Igniter
+
+The easiest way to install Arcana is using Igniter, which automatically configures your application:
+
+```bash
+mix igniter.install arcana
+mix ecto.migrate
+```
+
+This command will:
+
+- Add the `arcana` dependency to `mix.exs`
+- Create database migrations for documents and chunks
+- Configure Postgrex types for pgvector
+- Set up your repo configuration
+- Optionally mount the LiveView dashboard
+
+<Note>
+  You'll still need to set up PostgreSQL with pgvector and configure an Nx backend (see below).
+</Note>
+
+  </Tab>
+  <Tab title="Manual Installation">
+    
+### Manual Installation
+
+If you prefer manual setup or don't use Igniter:
+
+<Steps>
+  <Step title="Add dependency">
+    
+Add `arcana` to your `mix.exs` dependencies:
+
+```elixir mix.exs
+def deps do
+  [
+    {:arcana, "~> 1.0"}
+  ]
+end
+```
+
+Then fetch dependencies:
+
+```bash
+mix deps.get
+```
+
+  </Step>
+  
+  <Step title="Run installer">
+    
+Run the Arcana installer to generate migrations:
+
+```bash
+mix arcana.install
+mix ecto.migrate
+```
+
+  </Step>
+  
+  <Step title="Configure Postgrex types">
+    
+Create a Postgrex types module to support pgvector:
+
+```elixir lib/my_app/postgrex_types.ex
+Postgrex.Types.define(
+  MyApp.PostgrexTypes,
+  [Pgvector.Extensions.Vector] ++ Ecto.Adapters.Postgres.extensions(),
+  []
+)
+```
+
+Add it to your repo configuration:
+
+```elixir config/config.exs
+config :my_app, MyApp.Repo,
+  types: MyApp.PostgrexTypes
+```
+
+  </Step>
+  
+  <Step title="(Optional) Mount dashboard">
+    
+To use the LiveView dashboard, mount it in your router:
+
+```elixir lib/my_app_web/router.ex
+scope "/arcana" do
+  pipe_through [:browser]
+  forward "/", ArcanaWeb.Router
+end
+```
+
+<Warning>
+  In production, protect the dashboard with authentication by adding an `:admin` or `:require_authenticated_user` pipe.
+</Warning>
+
+  </Step>
+</Steps>
+
+  </Tab>
+</Tabs>
+
+## Database Setup
+
+### PostgreSQL with pgvector
+
+Arcana requires PostgreSQL with the pgvector extension for vector similarity search.
+
+<Steps>
+  <Step title="Start PostgreSQL with pgvector">
+    
+The easiest way is using Docker with the official pgvector image:
+
+```yaml docker-compose.yml
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: myapp_dev
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+```
+
+Start the database:
+
+```bash
+docker compose up -d
+```
+
+  </Step>
+  
+  <Step title="Run migrations">
+    
+The Arcana installer creates migrations for:
+
+- `arcana_documents` - Stores document metadata and content
+- `arcana_chunks` - Stores text chunks with embeddings
+- `arcana_collections` - Organizes documents into named collections
+- pgvector extension activation
+
+Apply them:
+
+```bash
+mix ecto.migrate
+```
+
+  </Step>
+  
+  <Step title="(Optional) Install pgvector locally">
+    
+For local PostgreSQL installations without Docker:
+
+<CodeGroup>
+
+```bash macOS
+brew install pgvector
+```
+
+```bash Ubuntu/Debian
+sudo apt install postgresql-16-pgvector
+```
+
+```bash Fedora
+sudo dnf install pgvector
+```
+
+</CodeGroup>
+
+Then enable it in your database:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+  </Step>
+</Steps>
+
+## Supervision Tree Setup
+
+Add Arcana components to your application's supervision tree:
+
+```elixir lib/my_app/application.ex
+def start(_type, _args) do
+  children = [
+    MyApp.Repo,
+    MyAppWeb.Endpoint,
+    Arcana.TaskSupervisor,  # Required for dashboard async operations
+    Arcana.Embedder.Local   # Only if using local Bumblebee embeddings
+  ]
+
+  opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+  Supervisor.start_link(children, opts)
+end
+```
+
+<Note>
+  - `Arcana.TaskSupervisor` is required if you're using the dashboard's Ask or Maintenance features
+  - `Arcana.Embedder.Local` is only needed when using local Bumblebee embeddings (the default)
+  - For OpenAI or other cloud embeddings, you can skip `Arcana.Embedder.Local`
+</Note>
+
+## Nx Backend Configuration
+
+For local embeddings, Arcana needs an Nx backend to run neural network models. Choose one based on your platform:
+
+<Tabs>
+  <Tab title="EXLA (Recommended)">
+    
+### EXLA - Google's XLA Compiler
+
+Best performance on most platforms (Linux, macOS, Windows).
+
+<Steps>
+  <Step title="Add dependency">
+    
+```elixir mix.exs
+def deps do
+  [
+    {:arcana, "~> 1.0"},
+    {:exla, "~> 0.9"}
+  ]
+end
+```
+
+  </Step>
+  
+  <Step title="Configure Nx">
+    
+```elixir config/config.exs
+config :nx,
+  default_backend: EXLA.Backend,
+  default_defn_options: [compiler: EXLA]
+```
+
+  </Step>
+  
+  <Step title="Install dependencies">
+    
+```bash
+mix deps.get
+```
+
+First run will download and compile XLA (may take a few minutes).
+
+  </Step>
+</Steps>
+
+  </Tab>
+  
+  <Tab title="EMLX (Apple Silicon)">
+    
+### EMLX - Apple's MLX Framework
+
+Optimized for macOS with Apple Silicon (M1/M2/M3).
+
+<Steps>
+  <Step title="Add dependency">
+    
+```elixir mix.exs
+def deps do
+  [
+    {:arcana, "~> 1.0"},
+    {:emlx, "~> 0.1"}
+  ]
+end
+```
+
+  </Step>
+  
+  <Step title="Configure Nx">
+    
+```elixir config/config.exs
+config :nx,
+  default_backend: EMLX.Backend,
+  default_defn_options: [compiler: EMLX]
+```
+
+  </Step>
+  
+  <Step title="Install dependencies">
+    
+```bash
+mix deps.get
+```
+
+  </Step>
+</Steps>
+
+<Note>
+  EMLX only works on macOS with Apple Silicon. For Intel Macs, use EXLA.
+</Note>
+
+  </Tab>
+  
+  <Tab title="Torchx">
+    
+### Torchx - PyTorch Backend
+
+No compilation required, uses eager execution.
+
+<Steps>
+  <Step title="Add dependency">
+    
+```elixir mix.exs
+def deps do
+  [
+    {:arcana, "~> 1.0"},
+    {:torchx, "~> 0.9"}
+  ]
+end
+```
+
+  </Step>
+  
+  <Step title="Configure Nx">
+    
+```elixir config/config.exs
+# For CPU
+config :nx,
+  default_backend: {Torchx.Backend, device: :cpu}
+
+# For Apple Silicon GPU acceleration
+config :nx,
+  default_backend: {Torchx.Backend, device: :mps}
+```
+
+  </Step>
+  
+  <Step title="Install dependencies">
+    
+```bash
+mix deps.get
+```
+
+  </Step>
+</Steps>
+
+  </Tab>
+</Tabs>
+
+## Embedding Provider Configuration
+
+Arcana supports multiple embedding providers. Choose based on your needs:
+
+### Local Embeddings (Default)
+
+Use Bumblebee for local embeddings - no API keys required:
+
+```elixir config/config.exs
+# Default - BGE Small (384 dimensions, 133MB)
+config :arcana, embedder: :local
+
+# Or specify a model
+config :arcana, embedder: {:local, model: "BAAI/bge-base-en-v1.5"}
+```
+
+<Note>
+  Local embeddings require an Nx backend (configured above).
+</Note>
+
+#### Available Local Models
+
+| Model | Dimensions | Size | Use Case |
+|-------|------------|------|-----------|
+| `BAAI/bge-small-en-v1.5` | 384 | 133MB | Default, good balance |
+| `BAAI/bge-base-en-v1.5` | 768 | 438MB | Better accuracy |
+| `BAAI/bge-large-en-v1.5` | 1024 | 1.3GB | Best accuracy |
+| `intfloat/e5-small-v2` | 384 | 133MB | Alternative to BGE |
+| `intfloat/e5-base-v2` | 768 | 438MB | E5 medium size |
+| `intfloat/e5-large-v2` | 1024 | 1.3GB | E5 best accuracy |
+| `thenlper/gte-small` | 384 | 67MB | Smallest, fastest |
+
+<Warning>
+  E5 models require special `query:`/`passage:` prefixes. Arcana handles this automatically.
+</Warning>
+
+### OpenAI Embeddings
+
+Use OpenAI's embedding API:
+
+```elixir config/config.exs
+config :arcana, embedder: :openai
+
+# Or specify a model
+config :arcana, embedder: {:openai, model: "text-embedding-3-large"}
+```
+
+Set your API key:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+<Note>
+  When using OpenAI embeddings, you don't need an Nx backend or `Arcana.Embedder.Local` in your supervision tree.
+</Note>
+
+### Custom Embeddings
+
+Implement the `Arcana.Embedder` behaviour for custom providers (Cohere, Voyage, etc.):
+
+```elixir lib/my_app/cohere_embedder.ex
+defmodule MyApp.CohereEmbedder do
+  @behaviour Arcana.Embedder
+
+  @impl true
+  def embed(text, _opts) do
+    # Call Cohere API
+    case Req.post("https://api.cohere.ai/v1/embed", 
+      json: %{texts: [text], model: "embed-english-v3.0"}) do
+      {:ok, %{body: %{"embeddings" => [embedding]}}} ->
+        {:ok, embedding}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def dimensions(_opts), do: 1024
+end
+```
+
+Configure it:
+
+```elixir config/config.exs
+config :arcana, embedder: MyApp.CohereEmbedder
+```
+
+## Verify Installation
+
+Test your installation in an IEx session:
+
+```elixir
+iex -S mix
+
+# Test ingestion
+{:ok, doc} = Arcana.ingest("Elixir is a functional programming language.", repo: MyApp.Repo)
+
+# Test search
+{:ok, results} = Arcana.search("functional programming", repo: MyApp.Repo)
+
+IO.inspect(results, label: "Search results")
+```
+
+You should see search results with similarity scores.
+
+## Optional: GraphRAG Setup
+
+If you want to use GraphRAG features (entity extraction, knowledge graphs):
+
+```bash
+mix arcana.graph.install
+mix ecto.migrate
+```
+
+This creates additional tables for entities, relationships, and communities.
+
+Enable GraphRAG during ingestion:
+
+```elixir
+Arcana.ingest("Your content", repo: MyApp.Repo, graph: true)
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart Tutorial" icon="rocket" href="/quickstart">
+    Build your first RAG application with a complete example
+  </Card>
+  <Card title="Configure Chunking" icon="scissors" href="/essentials/chunking">
+    Learn how to optimize text chunking for your use case
+  </Card>
+  <Card title="LLM Integration" icon="brain" href="/essentials/llm-integration">
+    Connect Arcana to OpenAI, Anthropic, or custom LLMs
+  </Card>
+  <Card title="Dashboard Setup" icon="gauge" href="/essentials/dashboard">
+    Set up the LiveView dashboard for document management
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="pgvector extension not found">
+    
+If you see errors about the `vector` extension:
+
+1. Make sure you're using the pgvector/pgvector Docker image, or
+2. Install pgvector on your local PostgreSQL installation
+3. Run `CREATE EXTENSION IF NOT EXISTS vector;` in your database
+
+  </Accordion>
+  
+  <Accordion title="Nx backend compilation errors">
+    
+If EXLA fails to compile:
+
+1. Make sure you have build tools installed (gcc, make)
+2. On macOS: `xcode-select --install`
+3. On Ubuntu: `sudo apt install build-essential`
+4. Try Torchx as an alternative: `{:torchx, "~> 0.9"}`
+
+  </Accordion>
+  
+  <Accordion title="Model download is slow">
+    
+First time using local embeddings downloads models from HuggingFace:
+
+- BGE Small: ~133MB
+- BGE Base: ~438MB
+- BGE Large: ~1.3GB
+
+Subsequent runs use cached models. The download only happens once.
+
+  </Accordion>
+  
+  <Accordion title="Postgrex types error">
+    
+If you see errors about vector types not being recognized:
+
+1. Ensure you created the `PostgrexTypes` module
+2. Added it to your repo config: `types: MyApp.PostgrexTypes`
+3. Restarted your application after config changes
+
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,476 @@
+---
+title: Arcana.VectorStore
+description: Behaviour for implementing custom vector storage backends
+---
+
+The `Arcana.VectorStore` behaviour allows you to implement custom vector storage backends. Arcana ships with two built-in implementations (pgvector and in-memory), but you can add support for any vector database or search service.
+
+## Required Callbacks
+
+### store/5
+
+Stores a vector with its ID and metadata in a collection.
+
+<ParamField path="collection" type="binary()" required>
+  The collection name (e.g., "products", "docs")
+</ParamField>
+
+<ParamField path="id" type="binary()" required>
+  Unique identifier for this vector
+</ParamField>
+
+<ParamField path="embedding" type="list()" required>
+  The embedding vector as a list of floats
+</ParamField>
+
+<ParamField path="metadata" type="map()" required>
+  Metadata to store with the vector (text content, chunk info, etc.)
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options passed from configuration or at call time
+</ParamField>
+
+**Returns:** `:ok` on success or `{:error, term()}` on failure.
+
+### search/3
+
+Searches for similar vectors in a collection using cosine similarity.
+
+<ParamField path="collection" type="binary()" required>
+  The collection name to search
+</ParamField>
+
+<ParamField path="query_embedding" type="list()" required>
+  The query embedding vector
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options including:
+  - `:limit` - Maximum results to return (default: 10)
+  - `:threshold` - Minimum similarity score (0.0-1.0)
+  - Additional backend-specific options
+</ParamField>
+
+**Returns:** List of result maps with `:id`, `:metadata`, and `:score` keys.
+
+### search_text/3
+
+Searches for matching text in a collection using fulltext search.
+
+<ParamField path="collection" type="binary()" required>
+  The collection name to search
+</ParamField>
+
+<ParamField path="query" type="String.t()" required>
+  The text query
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options including:
+  - `:limit` - Maximum results to return (default: 10)
+  - Additional backend-specific options
+</ParamField>
+
+**Returns:** List of result maps with `:id`, `:metadata`, and `:score` keys.
+
+### delete/3
+
+Deletes a vector from a collection.
+
+<ParamField path="collection" type="binary()" required>
+  The collection name
+</ParamField>
+
+<ParamField path="id" type="binary()" required>
+  The vector ID to delete
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options passed from configuration or at call time
+</ParamField>
+
+**Returns:** `:ok` on success or `{:error, term()}` on failure.
+
+### clear/2
+
+Clears all vectors from a collection.
+
+<ParamField path="collection" type="binary()" required>
+  The collection name to clear
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options passed from configuration or at call time
+</ParamField>
+
+**Returns:** `:ok`
+
+## Configuration
+
+Configure your vector store in `config/config.exs`:
+
+```elixir
+# Built-in: pgvector (default)
+config :arcana, vector_store: :pgvector
+
+# Built-in: in-memory (HNSWLib)
+config :arcana, vector_store: :memory
+
+# Custom module
+config :arcana, vector_store: MyApp.CustomVectorStore
+```
+
+You can also override at call time:
+
+```elixir
+# Override with memory backend
+Arcana.search("query", 
+  repo: MyApp.Repo,
+  vector_store: {:memory, pid: memory_pid}
+)
+
+# Override with custom backend
+Arcana.search("query",
+  repo: MyApp.Repo,
+  vector_store: MyApp.PineconeStore
+)
+```
+
+## Implementation Examples
+
+### Pinecone Vector Store
+
+```elixir
+defmodule MyApp.PineconeStore do
+  @behaviour Arcana.VectorStore
+
+  @impl true
+  def store(collection, id, embedding, metadata, opts) do
+    api_key = opts[:api_key] || System.get_env("PINECONE_API_KEY")
+    environment = opts[:environment] || System.get_env("PINECONE_ENVIRONMENT")
+    
+    url = "https://#{collection}-#{environment}.svc.pinecone.io/vectors/upsert"
+    
+    headers = [
+      {"Api-Key", api_key},
+      {"Content-Type", "application/json"}
+    ]
+    
+    body = Jason.encode!(%%{
+      vectors: [
+        %{
+          id: id,
+          values: embedding,
+          metadata: metadata
+        }
+      ]
+    })
+    
+    case HTTPoison.post(url, body, headers) do
+      {:ok, %{status_code: 200}} -> :ok
+      {:ok, %{status_code: status, body: body}} ->
+        {:error, "Pinecone error #{status}: #{body}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def search(collection, query_embedding, opts) do
+    api_key = opts[:api_key] || System.get_env("PINECONE_API_KEY")
+    environment = opts[:environment] || System.get_env("PINECONE_ENVIRONMENT")
+    limit = Keyword.get(opts, :limit, 10)
+    
+    url = "https://#{collection}-#{environment}.svc.pinecone.io/query"
+    
+    headers = [
+      {"Api-Key", api_key},
+      {"Content-Type", "application/json"}
+    ]
+    
+    body = Jason.encode!(%{
+      vector: query_embedding,
+      topK: limit,
+      includeMetadata: true
+    })
+    
+    case HTTPoison.post(url, body, headers) do
+      {:ok, %{status_code: 200, body: response_body}} ->
+        %{"matches" => matches} = Jason.decode!(response_body)
+        
+        Enum.map(matches, fn match ->
+          %{
+            id: match["id"],
+            metadata: match["metadata"],
+            score: match["score"]
+          }
+        end)
+      
+      {:ok, %{status_code: status}} ->
+        []
+      
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  @impl true
+  def search_text(_collection, _query, _opts) do
+    # Pinecone doesn't support native fulltext search
+    # Return empty results or implement hybrid approach
+    []
+  end
+
+  @impl true
+  def delete(collection, id, opts) do
+    api_key = opts[:api_key] || System.get_env("PINECONE_API_KEY")
+    environment = opts[:environment] || System.get_env("PINECONE_ENVIRONMENT")
+    
+    url = "https://#{collection}-#{environment}.svc.pinecone.io/vectors/delete"
+    
+    headers = [
+      {"Api-Key", api_key},
+      {"Content-Type", "application/json"}
+    ]
+    
+    body = Jason.encode!(%{ids: [id]})
+    
+    case HTTPoison.post(url, body, headers) do
+      {:ok, %{status_code: 200}} -> :ok
+      {:ok, %{status_code: status, body: body}} ->
+        {:error, "Pinecone error #{status}: #{body}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def clear(collection, opts) do
+    api_key = opts[:api_key] || System.get_env("PINECONE_API_KEY")
+    environment = opts[:environment] || System.get_env("PINECONE_ENVIRONMENT")
+    
+    url = "https://#{collection}-#{environment}.svc.pinecone.io/vectors/delete"
+    
+    headers = [
+      {"Api-Key", api_key},
+      {"Content-Type", "application/json"}
+    ]
+    
+    # Delete all vectors (use deleteAll parameter)
+    body = Jason.encode!(%{deleteAll: true})
+    
+    case HTTPoison.post(url, body, headers) do
+      {:ok, %{status_code: 200}} -> :ok
+      _ -> :ok  # Best effort
+    end
+  end
+end
+```
+
+### Elasticsearch Vector Store
+
+```elixir
+defmodule MyApp.ElasticsearchStore do
+  @behaviour Arcana.VectorStore
+
+  @impl true
+  def store(collection, id, embedding, metadata, opts) do
+    url = opts[:url] || "http://localhost:9200"
+    index = "arcana_#{collection}"
+    
+    doc = Map.merge(metadata, %{
+      "embedding" => embedding,
+      "indexed_at" => DateTime.utc_now()
+    })
+    
+    case Elastix.Document.index(url, index, "_doc", id, doc) do
+      {:ok, _response} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def search(collection, query_embedding, opts) do
+    url = opts[:url] || "http://localhost:9200"
+    index = "arcana_#{collection}"
+    limit = Keyword.get(opts, :limit, 10)
+    
+    # Use Elasticsearch's dense_vector similarity
+    query = %{
+      "size" => limit,
+      "query" => %{
+        "script_score" => %{
+          "query" => %{"match_all" => %{}},
+          "script" => %{
+            "source" => "cosineSimilarity(params.query_vector, 'embedding') + 1.0",
+            "params" => %{"query_vector" => query_embedding}
+          }
+        }
+      }
+    }
+    
+    case Elastix.Search.search(url, index, [], query) do
+      {:ok, %{"hits" => %{"hits" => hits}}} ->
+        Enum.map(hits, fn hit ->
+          %{
+            id: hit["_id"],
+            metadata: Map.delete(hit["_source"], "embedding"),
+            score: normalize_score(hit["_score"])
+          }
+        end)
+      
+      _ -> []
+    end
+  end
+
+  @impl true
+  def search_text(collection, query, opts) do
+    url = opts[:url] || "http://localhost:9200"
+    index = "arcana_#{collection}"
+    limit = Keyword.get(opts, :limit, 10)
+    
+    # Use Elasticsearch's full-text search
+    search_query = %{
+      "size" => limit,
+      "query" => %{
+        "multi_match" => %{
+          "query" => query,
+          "fields" => ["text", "metadata.*"]
+        }
+      }
+    }
+    
+    case Elastix.Search.search(url, index, [], search_query) do
+      {:ok, %{"hits" => %{"hits" => hits}}} ->
+        Enum.map(hits, fn hit ->
+          %{
+            id: hit["_id"],
+            metadata: Map.delete(hit["_source"], "embedding"),
+            score: normalize_score(hit["_score"])
+          }
+        end)
+      
+      _ -> []
+    end
+  end
+
+  @impl true
+  def delete(collection, id, opts) do
+    url = opts[:url] || "http://localhost:9200"
+    index = "arcana_#{collection}"
+    
+    case Elastix.Document.delete(url, index, "_doc", id) do
+      {:ok, _response} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def clear(collection, opts) do
+    url = opts[:url] || "http://localhost:9200"
+    index = "arcana_#{collection}"
+    
+    # Delete the entire index
+    Elastix.Index.delete(url, index)
+    :ok
+  end
+
+  defp normalize_score(score) do
+    # Elasticsearch scores need normalization
+    # This is a simple example - adjust based on your needs
+    min(1.0, max(0.0, score / 10.0))
+  end
+end
+```
+
+## Result Format
+
+All search methods must return a list of maps with these keys:
+
+```elixir
+[
+  %{
+    id: "chunk_123",
+    metadata: %{
+      "text" => "The chunk content...",
+      "document_id" => "doc_456",
+      "chunk_index" => 0
+    },
+    score: 0.87  # Similarity score between 0.0 and 1.0
+  },
+  # ... more results
+]
+```
+
+- **`:id`** - Unique identifier for the vector
+- **`:metadata`** - All metadata stored with the vector
+- **`:score`** - Similarity/relevance score (0.0 = no match, 1.0 = perfect match)
+
+## Built-in Backends
+
+### Pgvector (Default)
+
+Uses PostgreSQL with the pgvector extension for production deployments:
+
+```elixir
+config :arcana, vector_store: :pgvector
+
+# Search with pgvector
+Arcana.search("query", repo: MyApp.Repo)
+```
+
+### Memory (HNSWLib)
+
+Uses in-memory storage with HNSWLib for testing and development:
+
+```elixir
+config :arcana, vector_store: :memory
+
+# Add to supervision tree
+children = [
+  {Arcana.VectorStore.Memory, name: Arcana.VectorStore.Memory}
+]
+
+# Search with memory backend
+Arcana.search("query", 
+  repo: MyApp.Repo,
+  vector_store: {:memory, pid: Arcana.VectorStore.Memory}
+)
+```
+
+## Usage Examples
+
+```elixir
+# Store a vector
+Arcana.VectorStore.store(
+  "products",
+  "prod_123",
+  [0.1, 0.2, 0.3, ...],
+  %{"name" => "Widget", "price" => 29.99}
+)
+
+# Search by vector similarity
+results = Arcana.VectorStore.search(
+  "products",
+  query_embedding,
+  limit: 10,
+  threshold: 0.7
+)
+
+# Search by text
+results = Arcana.VectorStore.search_text(
+  "products",
+  "high quality widgets",
+  limit: 10
+)
+
+# Delete a vector
+Arcana.VectorStore.delete("products", "prod_123")
+
+# Clear entire collection
+Arcana.VectorStore.clear("products")
+```
+
+## See Also
+
+- [Arcana.Embedder](/api-reference/behaviours/embedder) - Embedding behaviour
+- [Arcana.Chunker](/api-reference/behaviours/chunker) - Text chunking behaviour

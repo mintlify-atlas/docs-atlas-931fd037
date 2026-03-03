@@ -1,0 +1,462 @@
+---
+title: GraphRAG
+description: Build knowledge graphs from documents with entity extraction, relationship mapping, and community detection for enhanced retrieval
+---
+
+GraphRAG enhances traditional vector search by building a knowledge graph from your documents, enabling entity-based retrieval and fusion search.
+
+## Overview
+
+GraphRAG provides:
+
+- **Entity-based retrieval** - Find chunks by following entity relationships
+- **Community summaries** - High-level context about clusters of related entities
+- **Fusion search** - Combine vector and graph results with Reciprocal Rank Fusion
+
+## Quick Start
+
+Once installed and configured, GraphRAG integrates seamlessly with the existing API:
+
+<CodeGroup>
+
+```elixir Ingest
+# Extracts entities and relationships automatically
+{:ok, document} = Arcana.ingest(content, repo: MyApp.Repo, graph: true)
+```
+
+```elixir Search
+# Combines vector similarity + entity graph traversal
+{:ok, results} = Arcana.search("Who leads OpenAI?", repo: MyApp.Repo, graph: true)
+```
+
+</CodeGroup>
+
+When `graph: true` is enabled:
+- **Ingest** extracts entities (people, organizations, etc.) and relationships from each chunk
+- **Search** finds entities in your query, traverses the graph, and combines results using Reciprocal Rank Fusion (RRF)
+
+## Installation
+
+GraphRAG requires additional database tables:
+
+<Steps>
+  <Step title="Install GraphRAG">
+    ```bash
+    mix arcana.graph.install
+    mix ecto.migrate
+    ```
+    
+    Creates tables for entities, relationships, entity mentions, and communities.
+  </Step>
+  
+  <Step title="Add NER Serving">
+    Add the NER serving to your supervision tree for entity extraction:
+    
+    ```elixir lib/my_app/application.ex
+    children = [
+      MyApp.Repo,
+      Arcana.TaskSupervisor,
+      Arcana.Embedder.Local,
+      Arcana.Graph.NERServing  # Add this for GraphRAG
+    ]
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+GraphRAG is disabled by default. Enable it globally or per-call:
+
+<Tabs>
+  <Tab title="Global Config">
+    ```elixir config/config.exs
+    config :arcana,
+      graph: [
+        enabled: true,
+        community_levels: 5,
+        resolution: 1.0
+      ]
+    ```
+  </Tab>
+  
+  <Tab title="Per-Call">
+    ```elixir
+    Arcana.ingest(text, repo: MyApp.Repo, graph: true)
+    Arcana.search(query, repo: MyApp.Repo, graph: true)
+    ```
+  </Tab>
+</Tabs>
+
+## Components
+
+GraphRAG uses pluggable behaviours for extraction and community detection:
+
+| Component | Default | Purpose |
+|-----------|---------|---------|  |
+| GraphExtractor | `GraphExtractor.LLM` | Extract entities + relationships (1 LLM call) |
+| EntityExtractor | `EntityExtractor.NER` | Extract entities only (fallback) |
+| RelationshipExtractor | `RelationshipExtractor.LLM` | Find relationships (fallback) |
+| CommunityDetector | `CommunityDetector.Leiden` | Detect entity communities |
+| CommunitySummarizer | `CommunitySummarizer.LLM` | Generate community summaries |
+
+<Tip>
+Use the combined `GraphExtractor.LLM` for efficiency (1 LLM call per chunk instead of 2).
+</Tip>
+
+## Graph Storage
+
+GraphRAG supports swappable storage backends:
+
+| Backend | Purpose |
+|---------|---------|  |
+| `:ecto` (default) | PostgreSQL persistence via Ecto |
+| `:memory` | In-memory storage for testing |
+| Custom module | Your own implementation |
+
+### Configuration
+
+<CodeGroup>
+
+```elixir Ecto (Default)
+config :arcana, :graph_store, :ecto
+
+# With options
+config :arcana, :graph_store, {:ecto, repo: MyApp.Repo}
+```
+
+```elixir Memory (Testing)
+# Start a memory store
+{:ok, pid} = Arcana.Graph.GraphStore.Memory.start_link([])
+
+# Use in tests
+Arcana.ingest(text, graph_store: {:memory, pid: pid})
+```
+
+```elixir Custom Module
+config :arcana, :graph_store, MyApp.CustomGraphStore
+```
+
+</CodeGroup>
+
+### Custom Backend
+
+Implement the `Arcana.Graph.GraphStore` behaviour:
+
+```elixir
+defmodule MyApp.Neo4jGraphStore do
+  @behaviour Arcana.Graph.GraphStore
+
+  @impl true
+  def persist_entities(collection_id, entities, opts) do
+    # Store entities, return map of entity names to IDs
+    {:ok, %{"Sam Altman" => "entity_123", "OpenAI" => "entity_456"}}
+  end
+
+  @impl true
+  def persist_relationships(relationships, entity_id_map, opts) do
+    # Store relationships between entities
+    :ok
+  end
+
+  @impl true
+  def search(entity_names, collection_ids, opts) do
+    # Find chunks by entity names
+    [%{chunk_id: "chunk_123", score: 0.9}]
+  end
+
+  # ... other callbacks
+end
+```
+
+See `Arcana.Graph.GraphStore` for the complete callback documentation.
+
+## Building a Graph
+
+### Combined Extraction (Recommended)
+
+The combined `GraphExtractor.LLM` extracts entities and relationships in a single LLM call:
+
+```elixir config/runtime.exs
+config :arcana,
+  llm: {"openai:gpt-4o-mini", api_key: System.get_env("OPENAI_API_KEY")},
+  graph: [
+    enabled: true,
+    extractor: Arcana.Graph.GraphExtractor.LLM
+  ]
+```
+
+Or use programmatically:
+
+```elixir
+alias Arcana.Graph.GraphBuilder
+
+{:ok, graph_data} = GraphBuilder.build(chunks,
+  extractor: {Arcana.Graph.GraphExtractor.LLM, llm: my_llm}
+)
+
+# Returns:
+# %{
+#   entities: [%{name: "Sam Altman", type: "person", description: "CEO of OpenAI"}],
+#   relationships: [%{source: "Sam Altman", target: "OpenAI", type: "LEADS", strength: 9}],
+#   mentions: [%{entity_name: "Sam Altman", chunk_id: "chunk_123"}]
+# }
+```
+
+### Separate Extractors (Fallback)
+
+If `extractor` is not set, Arcana falls back to separate entity and relationship extractors:
+
+```elixir
+{:ok, graph_data} = GraphBuilder.build(chunks,
+  entity_extractor: {Arcana.Graph.EntityExtractor.NER, []},
+  relationship_extractor: {Arcana.Graph.RelationshipExtractor.LLM, llm: my_llm}
+)
+```
+
+## Querying the Graph
+
+### Find Entities
+
+```elixir
+# Find entities by name
+entities = Graph.find_entities(graph, "OpenAI")
+
+# With fuzzy matching
+entities = Graph.find_entities(graph, "Open AI", fuzzy: true)
+```
+
+### Traverse Relationships
+
+```elixir
+# Get connected entities
+connected = Graph.traverse(graph, entity_id, depth: 2)
+```
+
+### Graph Search
+
+```elixir
+# Search graph for relevant chunks
+entities = [%{name: "OpenAI", type: :organization}]
+results = Graph.search(graph, entities, depth: 2)
+```
+
+## Fusion Search
+
+Combine vector and graph search with Reciprocal Rank Fusion:
+
+```elixir
+# Run vector search
+{:ok, vector_results} = Arcana.search(query, repo: MyApp.Repo)
+
+# Extract entities from query
+{:ok, entities} = Arcana.Graph.EntityExtractor.NER.extract(query, [])
+
+# Combine with graph search
+results = Graph.fusion_search(graph, entities, vector_results,
+  depth: 2,
+  limit: 10,
+  k: 60  # RRF constant
+)
+```
+
+## Community Detection
+
+The Leiden algorithm detects clusters of related entities:
+
+```elixir
+detector = {Arcana.Graph.CommunityDetector.Leiden, resolution: 1.0}
+{:ok, communities} = Arcana.Graph.CommunityDetector.detect(detector, entities, relationships)
+
+# Returns communities with hierarchy:
+# [
+#   %{level: 0, entity_ids: ["entity1", "entity2"]},
+#   %{level: 1, entity_ids: ["entity1", "entity2", "entity3"]}
+# ]
+```
+
+### Community Summaries
+
+Get high-level context about entity clusters:
+
+```elixir
+# Get all summaries at a specific level
+summaries = Graph.community_summaries(graph, level: 0)
+
+# Get summaries containing a specific entity
+summaries = Graph.community_summaries(graph, entity_id: "entity123")
+```
+
+## Custom Implementations
+
+All components support custom implementations via behaviours.
+
+### Custom GraphExtractor
+
+```elixir
+defmodule MyApp.CustomGraphExtractor do
+  @behaviour Arcana.Graph.GraphExtractor
+
+  @impl true
+  def extract(text, opts) do
+    # Your extraction logic
+    entities = extract_entities(text, opts)
+    relationships = extract_relationships(text, entities, opts)
+    {:ok, %{entities: entities, relationships: relationships}}
+  end
+end
+
+# Configure globally
+config :arcana, :graph,
+  extractor: MyApp.CustomGraphExtractor
+```
+
+### Inline Functions
+
+For quick customizations:
+
+```elixir
+# Inline combined extractor
+extractor = fn text, _opts ->
+  {:ok, %{
+    entities: [%{name: "Example", type: :concept}],
+    relationships: [%{source: "A", target: "B", type: "RELATES_TO"}]
+  }}
+end
+
+GraphBuilder.build(chunks, extractor: extractor)
+```
+
+## Maintenance Tasks
+
+GraphRAG provides mix tasks for managing the knowledge graph.
+
+### Rebuild Graph
+
+Re-extract entities and relationships from all chunks:
+
+```bash
+# Rebuild all collections
+mix arcana.graph.rebuild
+
+# Rebuild specific collection
+mix arcana.graph.rebuild --collection my-docs
+
+# Resume interrupted rebuild
+mix arcana.graph.rebuild --resume
+```
+
+<Note>
+Use this when you've changed the graph extractor configuration or want to regenerate entity/relationship data.
+</Note>
+
+### Detect Communities
+
+Run Leiden community detection:
+
+```bash
+# Detect communities for all collections
+mix arcana.graph.detect_communities
+
+# Specific collection
+mix arcana.graph.detect_communities --collection my-docs
+
+# Custom resolution (higher = smaller communities)
+mix arcana.graph.detect_communities --resolution 1.5
+
+# Multiple hierarchy levels
+mix arcana.graph.detect_communities --max-level 3
+```
+
+### Summarize Communities
+
+Generate LLM summaries for detected communities:
+
+```bash
+# Summarize dirty communities
+mix arcana.graph.summarize_communities
+
+# Force regenerate all summaries
+mix arcana.graph.summarize_communities --force
+
+# Parallel summarization (faster)
+mix arcana.graph.summarize_communities --concurrency 4
+```
+
+<Warning>
+Requires an LLM to be configured. See the [LLM Integration guide](/guides/llm-integration) for details.
+</Warning>
+
+### Typical Workflow
+
+After ingesting new documents:
+
+<Steps>
+  <Step title="Detect Communities">
+    ```bash
+    mix arcana.graph.detect_communities
+    ```
+  </Step>
+  
+  <Step title="Generate Summaries">
+    ```bash
+    mix arcana.graph.summarize_communities
+    ```
+  </Step>
+</Steps>
+
+To refresh everything:
+
+<Steps>
+  <Step title="Rebuild Graph">
+    ```bash
+    mix arcana.graph.rebuild
+    ```
+  </Step>
+  
+  <Step title="Re-detect Communities">
+    ```bash
+    mix arcana.graph.detect_communities
+    ```
+  </Step>
+  
+  <Step title="Regenerate Summaries">
+    ```bash
+    mix arcana.graph.summarize_communities --force
+    ```
+  </Step>
+</Steps>
+
+## Telemetry
+
+GraphRAG emits telemetry events for observability:
+
+```elixir
+:telemetry.attach(
+  "graph-metrics",
+  [:arcana, :graph, :build, :stop],
+  fn _event, measurements, metadata, _config ->
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+    Logger.info("Built graph: #{metadata.entity_count} entities, #{metadata.relationship_count} relationships in #{duration_ms}ms")
+  end,
+  nil
+)
+```
+
+See the [Telemetry Guide](/guides/telemetry) for complete event documentation.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Search Algorithms" icon="magnifying-glass" href="/guides/search-algorithms">
+    Understand how fusion search combines vector and graph results
+  </Card>
+  <Card title="Evaluation" icon="chart-line" href="/guides/evaluation">
+    Measure retrieval quality with and without GraphRAG
+  </Card>
+  <Card title="Telemetry" icon="chart-mixed" href="/guides/telemetry">
+    Monitor graph building and search performance
+  </Card>
+  <Card title="Dashboard" icon="gauge" href="/guides/dashboard">
+    Explore entities and relationships in the web UI
+  </Card>
+</CardGroup>

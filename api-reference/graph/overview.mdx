@@ -1,0 +1,220 @@
+---
+title: GraphRAG Overview
+description: Graph-enhanced Retrieval Augmented Generation for Arcana
+---
+
+## What is GraphRAG?
+
+GraphRAG (Graph-enhanced Retrieval Augmented Generation) extends traditional RAG by building a knowledge graph from your documents. Instead of relying solely on vector similarity, GraphRAG:
+
+- **Extracts entities** (people, organizations, locations, concepts) from text
+- **Identifies relationships** between entities using LLMs or patterns
+- **Detects communities** of related entities using the Leiden algorithm
+- **Combines graph and vector search** using Reciprocal Rank Fusion (RRF)
+
+This approach improves retrieval accuracy by leveraging the semantic structure of your knowledge.
+
+## Architecture
+
+GraphRAG consists of several modular components:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      GraphRAG Pipeline                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                               │
+│  1. Entity Extraction                                         │
+│     ├─ NER (Bumblebee distilbert-NER)          [Default]     │
+│     └─ LLM-based extraction                    [Optional]     │
+│                                                               │
+│  2. Relationship Extraction                                   │
+│     ├─ LLM-based extraction                    [Default]     │
+│     ├─ Co-occurrence patterns                  [Optional]     │
+│     └─ Custom patterns                         [Optional]     │
+│                                                               │
+│  3. Community Detection                                       │
+│     └─ Leiden algorithm (via Rust NIF)         [Optional]     │
+│                                                               │
+│  4. Community Summarization                                   │
+│     └─ LLM-based summarization                 [Optional]     │
+│                                                               │
+│  5. Fusion Search                                             │
+│     └─ RRF: Vector + Graph → Ranked Results                   │
+│                                                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow
+
+**During Ingest:**
+```elixir
+Document → Chunks → Entities → Relationships → Communities → Database
+```
+
+**During Search:**
+```elixir
+Query → [Vector Search] → Results
+      → [Entity Extraction] → Graph Traversal → Results
+                            ↓
+                    RRF Fusion → Final Results
+```
+
+## When to Use GraphRAG
+
+### Best Use Cases
+
+✅ **Multi-hop questions**: "Who works at companies founded by Y Combinator alumni?"
+
+✅ **Relationship queries**: "What is the connection between OpenAI and Microsoft?"
+
+✅ **Entity-centric search**: "Tell me everything about Sam Altman"
+
+✅ **Domain knowledge**: Technical documentation with many named concepts
+
+✅ **Global understanding**: Questions requiring broad context (use community summaries)
+
+### When Vector Search Alone is Better
+
+❌ **Unstructured content**: Pure creative writing, narratives without entities
+
+❌ **Simple semantic search**: "What are best practices for caching?"
+
+❌ **Cost-sensitive**: GraphRAG requires extra LLM calls and compute
+
+❌ **Low-entity documents**: Content with few named entities or relationships
+
+## Installation
+
+GraphRAG is optional and requires separate installation:
+
+```bash
+# Install graph dependencies
+mix arcana.graph.install
+
+# Run migrations
+mix ecto.migrate
+```
+
+For community detection, add `leidenfold` to your dependencies:
+
+```elixir
+defp deps do
+  [
+    {:arcana, "~> 1.2"},
+    {:leidenfold, "~> 0.2"}  # Optional: for community detection
+  ]
+end
+```
+
+## Configuration
+
+Enable GraphRAG globally or per-call:
+
+```elixir
+# config/config.exs
+config :arcana,
+  graph: [
+    enabled: true,
+    community_levels: 5,
+    resolution: 1.0,
+    # Optional: configure extractors
+    entity_extractor: :ner,  # or {MyApp.CustomExtractor, opts}
+    relationship_extractor: {Arcana.Graph.RelationshipExtractor.LLM, []},
+    community_detector: {Arcana.Graph.CommunityDetector.Leiden, resolution: 1.0}
+  ]
+```
+
+Add the NER serving to your supervision tree:
+
+```elixir
+children = [
+  MyApp.Repo,
+  Arcana.Embedder.Local,
+  Arcana.Graph.NERServing  # For entity extraction
+]
+```
+
+## Main Functions
+
+### Building Graphs
+
+```elixir
+# Build graph from chunks
+{:ok, graph_data} = Arcana.Graph.build(chunks,
+  entity_extractor: &MyApp.extract_entities/2,
+  relationship_extractor: &MyApp.extract_relationships/3
+)
+
+# Convert to queryable format
+graph = Arcana.Graph.to_query_graph(graph_data, chunks)
+```
+
+See [Arcana.Graph.build/2](/api-reference/graph#build) in `lib/arcana/graph.ex:150`
+
+### Searching Graphs
+
+```elixir
+# Graph-only search
+entities = [%{name: "OpenAI", type: :organization}]
+results = Arcana.Graph.search(graph, entities, depth: 2)
+
+# Fusion search (combines vector + graph)
+results = Arcana.Graph.fusion_search(graph, entities, vector_results,
+  depth: 1,
+  limit: 10,
+  k: 60
+)
+```
+
+See [Arcana.Graph.fusion_search/4](/api-reference/graph#fusion_search) in `lib/arcana/graph.ex:228`
+
+### Community Summaries
+
+```elixir
+# Get all top-level summaries
+summaries = Arcana.Graph.community_summaries(graph, level: 0)
+
+# Get summaries for a specific entity
+summaries = Arcana.Graph.community_summaries(graph, entity_id: "entity_123")
+```
+
+See [Arcana.Graph.community_summaries/2](/api-reference/graph#community_summaries) in `lib/arcana/graph.ex:249`
+
+### Finding and Traversing
+
+```elixir
+# Find entities by name
+entities = Arcana.Graph.find_entities(graph, "OpenAI", fuzzy: false)
+
+# Traverse relationships
+related = Arcana.Graph.traverse(graph, entity_id, depth: 2)
+```
+
+## Integration with Ingest
+
+GraphRAG automatically integrates with `Arcana.ingest/2`:
+
+```elixir
+# Enable graph building during ingest
+Arcana.ingest(text,
+  repo: MyApp.Repo,
+  collection: "docs",
+  graph: true,  # Enable GraphRAG
+  progress: fn current, total ->
+    IO.puts("Processed chunk #{current}/#{total}")
+  end
+)
+```
+
+This will:
+1. Extract entities from each chunk using NER or LLM
+2. Extract relationships between entities
+3. Persist entities, relationships, and mentions to the database
+4. Optionally detect communities and generate summaries
+
+## Next Steps
+
+- [Entity Extraction](/api-reference/graph/entities) - Learn about entity extractors
+- [Relationships](/api-reference/graph/relationships) - Configure relationship extraction
+- [Communities](/api-reference/graph/communities) - Understand community detection
+- [Search](/api-reference/graph/search) - Master graph search and RRF fusion

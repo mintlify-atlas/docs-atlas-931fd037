@@ -1,0 +1,186 @@
+---
+title: Dashboard
+description: Web UI for managing documents, testing search, running evaluations, and exploring your knowledge base
+---
+
+The Arcana Dashboard is a Phoenix LiveView interface for managing documents and testing RAG operations.
+
+## Setup
+
+<Steps>
+  <Step title="Add TaskSupervisor">
+    The dashboard requires `Arcana.TaskSupervisor` for async operations:
+    
+    ```elixir lib/my_app/application.ex
+    children = [
+      MyApp.Repo,
+      Arcana.TaskSupervisor,  # Required for dashboard
+      # ...
+    ]
+    ```
+  </Step>
+  
+  <Step title="Add Dashboard Route">
+    ```elixir lib/my_app_web/router.ex
+    import ArcanaWeb.Router
+
+    scope "/" do
+      pipe_through :browser
+
+      arcana_dashboard "/arcana"
+    end
+    ```
+    
+    Visit `http://localhost:4000/arcana` to access the dashboard.
+  </Step>
+</Steps>
+
+## Options
+
+```elixir
+arcana_dashboard "/arcana",
+  repo: MyApp.Repo,                    # Override repo
+  on_mount: [MyAppWeb.Auth],           # Add authentication
+  live_socket_path: "/live"            # Custom LiveView socket path
+```
+
+### Authentication
+
+Protect the dashboard with your existing authentication:
+
+```elixir
+arcana_dashboard "/arcana",
+  on_mount: [MyAppWeb.RequireAdmin]
+```
+
+<Warning>
+The dashboard provides full access to your Arcana data. Always add authentication in production.
+</Warning>
+
+## Pages
+
+### Documents
+
+**Route:** `/arcana/documents`
+
+- **View documents** - Browse all ingested documents with pagination
+- **View chunks** - See how documents are chunked
+- **Ingest text** - Paste content directly with format selection
+- **Upload files** - Upload `.txt`, `.md`, or `.pdf` files
+- **Filter by collection** - View documents from specific collections
+
+### Ask
+
+**Route:** `/arcana/ask`
+
+- **Simple mode** - Basic RAG question answering
+- **Agentic mode** - Full pipeline with query expansion, decomposition, and self-correction
+- **Collection selection** - Choose which collections to search (or let the LLM select)
+- **Pipeline options** - Toggle expand, decompose, rerank, and self-correct steps
+
+### Search
+
+**Route:** `/arcana/search`
+
+- **Test queries** - Try searches against your documents
+- **View results** - See retrieved chunks with similarity scores and expandable details
+- **Compare modes** - Test semantic, full-text, and hybrid search
+- **Filter by collection** - Search within specific collections
+
+### Collections
+
+**Route:** `/arcana/collections`
+
+- **View collections** - Browse all collections with document counts
+- **Create collections** - Add new collections with descriptions
+- **Edit collections** - Update collection descriptions
+- **Delete collections** - Remove empty collections
+
+### Evaluation
+
+**Route:** `/arcana/evaluation`
+
+- **View test cases** - See questions and their relevant chunks
+- **Run evaluations** - Execute evaluation runs
+- **View metrics** - See MRR, Precision, Recall scores
+- **Compare runs** - Track changes over time
+
+See the [Evaluation Guide](/guides/evaluation) for more details.
+
+### Maintenance
+
+**Route:** `/arcana/maintenance`
+
+- **Rebuild embeddings** - Re-embed all chunks (useful after model changes)
+- **Orphan cleanup** - Find and remove chunks without parent documents
+- **Database operations** - Maintenance tasks for the vector store
+
+### Info
+
+**Route:** `/arcana/info`
+
+- **Configuration** - View current Arcana settings
+- **Embedding model** - See which model is in use
+- **Statistics** - Document and chunk counts
+
+## Deployment
+
+The dashboard uses Phoenix LiveView. Ensure your production configuration includes:
+
+```elixir config/runtime.exs
+config :my_app, MyAppWeb.Endpoint,
+  url: [host: "example.com", port: 443],
+  check_origin: ["//example.com"]
+```
+
+### Assets
+
+Dashboard assets (CSS, JS) are served inline - no build step required.
+
+## Security Considerations
+
+The dashboard provides full access to your Arcana data:
+
+<Steps>
+  <Step title="Add Authentication">
+    Always add authentication in production
+  </Step>
+  <Step title="Restrict Access">
+    Limit to admin users who need access
+  </Step>
+  <Step title="Consider IP Allowlisting">
+    For sensitive deployments, restrict by IP
+  </Step>
+</Steps>
+
+### Example: Admin-Only Access
+
+```elixir
+defmodule MyAppWeb.RequireAdmin do
+  import Phoenix.LiveView
+
+  def on_mount(:default, _params, session, socket) do
+    case session["current_user"] do
+      %{admin: true} -> {:cont, socket}
+      _ -> {:halt, redirect(socket, to: "/")}
+    end
+  end
+end
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Basic Usage" icon="play" href="/guides/basic-usage">
+    Learn how to ingest and search documents
+  </Card>
+  <Card title="Evaluation" icon="chart-line" href="/guides/evaluation">
+    Run evaluations from the dashboard
+  </Card>
+  <Card title="Agentic RAG" icon="robot" href="/guides/agentic-rag">
+    Test advanced pipelines in Ask mode
+  </Card>
+  <Card title="GraphRAG" icon="diagram-project" href="/guides/graphrag">
+    Explore entities and relationships
+  </Card>
+</CardGroup>

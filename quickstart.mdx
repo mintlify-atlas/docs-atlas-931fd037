@@ -1,80 +1,427 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Build your first RAG application in 5 minutes with Arcana
 ---
 
-## Get started in three steps
+Get from zero to a working RAG application with this complete tutorial. You'll ingest documents, search for relevant content, and ask questions powered by AI.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+- Elixir 1.14+ and Phoenix 1.7+
+- PostgreSQL running with pgvector extension
+- OpenAI API key (or use local embeddings)
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+If you haven't installed Arcana yet, follow the [Installation Guide](/installation) first.
 </Note>
+
+## Complete Working Example
+
+This tutorial walks through building a simple RAG system for Elixir documentation. Copy and run each step in your IEx session.
+
+<Steps>
+  <Step title="Start your application">
+    
+Open an IEx session with your Phoenix app:
+
+```bash
+iex -S mix
+```
+
+  </Step>
+  
+  <Step title="Ingest some documents">
+    
+Add content to your vector store. We'll ingest a few facts about Elixir:
+
+```elixir
+# Ingest documents about Elixir
+{:ok, doc1} = Arcana.ingest(
+  "Elixir is a dynamic, functional programming language designed for building scalable and maintainable applications. It runs on the Erlang VM (BEAM), which is known for creating low-latency, distributed, and fault-tolerant systems.",
+  repo: MyApp.Repo,
+  metadata: %{"topic" => "basics", "source" => "elixir-lang.org"},
+  collection: "elixir-docs"
+)
+
+{:ok, doc2} = Arcana.ingest(
+  "Phoenix is a web framework written in Elixir that enables building rich, interactive web applications with server-side rendering, real-time features using LiveView, and excellent performance.",
+  repo: MyApp.Repo,
+  metadata: %{"topic" => "phoenix", "source" => "phoenixframework.org"},
+  collection: "elixir-docs"
+)
+
+{:ok, doc3} = Arcana.ingest(
+  "OTP (Open Telecom Platform) is a set of libraries and design principles for building concurrent, distributed systems in Erlang and Elixir. GenServer is the most commonly used OTP behavior for implementing server processes.",
+  repo: MyApp.Repo,
+  metadata: %{"topic" => "otp", "source" => "elixir-lang.org"},
+  collection: "elixir-docs"
+)
+```
+
+<Note>
+Behind the scenes, Arcana is chunking the text, generating embeddings, and storing them in PostgreSQL with pgvector.
+</Note>
+
+  </Step>
+  
+  <Step title="Search for relevant content">
+    
+Now search for content using semantic similarity:
+
+```elixir
+# Semantic search - finds content by meaning
+{:ok, results} = Arcana.search(
+  "What is Phoenix used for?",
+  repo: MyApp.Repo,
+  limit: 3
+)
+
+# Inspect the results
+Enum.each(results, fn chunk ->
+  IO.puts("Score: #{chunk.similarity}")
+  IO.puts("Text: #{chunk.text}\n")
+end)
+```
+
+Expected output:
+```
+Score: 0.89
+Text: Phoenix is a web framework written in Elixir that enables building rich, interactive web applications...
+
+Score: 0.72
+Text: Elixir is a dynamic, functional programming language designed for building scalable...
+```
+
+  </Step>
+  
+  <Step title="Ask a question">
+    
+Use RAG to answer questions based on your documents:
+
+```elixir
+# Configure your LLM (requires OPENAI_API_KEY environment variable)
+{:ok, answer} = Arcana.ask(
+  "What is Phoenix and what can I build with it?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini"
+)
+
+IO.puts(answer)
+```
+
+Expected output:
+```
+Phoenix is a web framework written in Elixir that enables you to build rich, 
+interactive web applications. You can create applications with server-side 
+rendering, add real-time features using LiveView, and benefit from excellent 
+performance characteristics.
+```
+
+<Note>
+The `ask/2` function retrieves relevant chunks via semantic search, then sends them to the LLM as context for generating the answer.
+</Note>
+
+  </Step>
+</Steps>
+
+## Try Different Search Modes
+
+Arcana supports multiple search strategies. Here's how they compare:
+
+<Tabs>
+  <Tab title="Semantic Search">
+    
+Best for natural language and conceptual queries:
+
+```elixir
+{:ok, results} = Arcana.search(
+  "building fault-tolerant systems",
+  repo: MyApp.Repo,
+  mode: :semantic  # This is the default
+)
+```
+
+Finds content by **meaning**, not just keywords. Great for "What is X?" or "How do I Y?" questions.
+
+  </Tab>
+  
+  <Tab title="Full-Text Search">
+    
+Best for exact keyword matches:
+
+```elixir
+{:ok, results} = Arcana.search(
+  "GenServer",
+  repo: MyApp.Repo,
+  mode: :fulltext
+)
+```
+
+Finds exact **keyword matches**. Perfect for searching specific terms, function names, or code snippets.
+
+  </Tab>
+  
+  <Tab title="Hybrid Search">
+    
+Best of both worlds - combines semantic and keyword matching:
+
+```elixir
+{:ok, results} = Arcana.search(
+  "Phoenix LiveView real-time",
+  repo: MyApp.Repo,
+  mode: :hybrid
+)
+```
+
+Uses **Reciprocal Rank Fusion** to combine vector similarity and full-text results. Recommended for general-purpose search.
+
+  </Tab>
+</Tabs>
+
+## Add More Advanced Features
+
+### Filter by Collection
+
+Organize documents into collections for better routing:
+
+```elixir
+# Search only in specific collection
+{:ok, results} = Arcana.search(
+  "web framework",
+  repo: MyApp.Repo,
+  collection: "elixir-docs"
+)
+```
+
+### Set Similarity Threshold
+
+Filter out low-quality matches:
+
+```elixir
+# Only return results with similarity > 0.7
+{:ok, results} = Arcana.search(
+  "distributed systems",
+  repo: MyApp.Repo,
+  threshold: 0.7,
+  limit: 5
+)
+```
+
+### Ingest Files
+
+Load content from text, markdown, or PDF files:
+
+```elixir
+# Supports .txt, .md, .pdf
+{:ok, document} = Arcana.ingest_file(
+  "path/to/elixir-guide.pdf",
+  repo: MyApp.Repo,
+  collection: "elixir-docs",
+  metadata: %{"type" => "guide"}
+)
+```
+
+## Complete End-to-End Example
+
+Here's a complete working script you can save and run:
+
+```elixir complete_example.exs
+# Start with a clean slate (optional - deletes existing documents)
+# Arcana.Document |> MyApp.Repo.delete_all()
+
+# Ingest a small knowledge base
+documents = [
+  {"Elixir is a functional language that runs on the BEAM VM, known for concurrency and fault tolerance.", "elixir-basics"},
+  {"Phoenix Framework enables building real-time web applications with LiveView and channels.", "phoenix-intro"},
+  {"GenServer is an OTP behavior for implementing server processes that maintain state.", "otp-genserver"},
+  {"Ecto is the database wrapper for Elixir, providing schemas, queries, and migrations.", "ecto-intro"}
+]
+
+Enum.each(documents, fn {text, source} ->
+  {:ok, _doc} = Arcana.ingest(
+    text,
+    repo: MyApp.Repo,
+    collection: "elixir-docs",
+    metadata: %{"source" => source}
+  )
+  IO.puts("✓ Ingested: #{source}")
+end)
+
+# Search for relevant content
+IO.puts("\n=== Semantic Search Results ===")
+{:ok, search_results} = Arcana.search(
+  "How do I build real-time web apps?",
+  repo: MyApp.Repo,
+  limit: 2
+)
+
+Enum.each(search_results, fn chunk ->
+  IO.puts("Score: #{Float.round(chunk.similarity, 2)} | #{String.slice(chunk.text, 0..80)}...")
+end)
+
+# Ask a question with RAG
+IO.puts("\n=== RAG Answer ===")
+{:ok, answer} = Arcana.ask(
+  "What is Phoenix Framework and what are its main features?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini"
+)
+
+IO.puts(answer)
+```
+
+Run it with:
+
+```bash
+mix run complete_example.exs
+```
+
+## Using Local Embeddings
+
+Don't want to use OpenAI? Use local embeddings instead:
+
+<Steps>
+  <Step title="Configure local embeddings">
+    
+```elixir config/config.exs
+# Use local Bumblebee embeddings (no API keys needed)
+config :arcana, embedder: :local
+
+# Configure Nx backend
+config :nx,
+  default_backend: EXLA.Backend,
+  default_defn_options: [compiler: EXLA]
+```
+
+  </Step>
+  
+  <Step title="Add to supervision tree">
+    
+```elixir lib/my_app/application.ex
+def start(_type, _args) do
+  children = [
+    MyApp.Repo,
+    Arcana.Embedder.Local  # Start local embedder
+  ]
+  
+  opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+  Supervisor.start_link(children, opts)
+end
+```
+
+  </Step>
+  
+  <Step title="Use local LLM (optional)">
+    
+For a completely local setup, use a local LLM:
+
+```elixir
+# With Ollama running locally
+local_llm = fn prompt ->
+  case Req.post("http://localhost:11434/api/generate",
+    json: %{model: "llama2", prompt: prompt}) do
+    {:ok, %{body: %{"response" => response}}} ->
+      {:ok, response}
+    error ->
+      error
+  end
+end
+
+{:ok, answer} = Arcana.ask(
+  "What is Elixir?",
+  repo: MyApp.Repo,
+  llm: local_llm
+)
+```
+
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Agentic RAG" icon="robot" href="/guides/agentic-rag">
+    Build multi-step RAG pipelines with query expansion and re-ranking
+  </Card>
+  <Card title="GraphRAG" icon="network-wired" href="/guides/graphrag">
+    Extract entities and relationships for knowledge graph search
+  </Card>
+  <Card title="Search Algorithms" icon="magnifying-glass" href="/guides/search-algorithms">
+    Deep dive into semantic, full-text, and hybrid search
+  </Card>
+  <Card title="Dashboard" icon="gauge" href="/guides/dashboard">
+    Use the LiveView UI to manage documents and test queries
+  </Card>
+</CardGroup>
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="Search returns no results">
+    
+Check that documents were ingested successfully:
+
+```elixir
+# Count documents
+MyApp.Repo.aggregate(Arcana.Document, :count)
+
+# Count chunks
+MyApp.Repo.aggregate(Arcana.Chunk, :count)
+```
+
+Lower the similarity threshold:
+
+```elixir
+{:ok, results} = Arcana.search(
+  "your query",
+  repo: MyApp.Repo,
+  threshold: 0.5  # Lower threshold
+)
+```
+
+  </Accordion>
+  
+  <Accordion title="OpenAI API errors">
+    
+Make sure your API key is set:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+Verify it's accessible:
+
+```elixir
+System.get_env("OPENAI_API_KEY")
+```
+
+Or pass the LLM configuration explicitly:
+
+```elixir
+{:ok, answer} = Arcana.ask(
+  "question",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini"
+)
+```
+
+  </Accordion>
+  
+  <Accordion title="Slow first-time embedding">
+    
+Local embeddings download models on first use (~133MB for default model). This is a one-time download:
+
+- Default (BGE Small): 133MB
+- BGE Base: 438MB  
+- BGE Large: 1.3GB
+
+Subsequent runs use cached models.
+
+For faster startup, use OpenAI embeddings instead:
+
+```elixir
+config :arcana, embedder: :openai
+```
+
+  </Accordion>
+</AccordionGroup>

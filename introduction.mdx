@@ -1,0 +1,277 @@
+---
+title: Introduction to Arcana
+description: Embeddable RAG library for Elixir/Phoenix with vector search, document retrieval, and AI-powered question answering
+---
+
+# Welcome to Arcana 🔮📚
+
+Arcana is a powerful RAG (Retrieval Augmented Generation) library for Elixir that brings vector search, document retrieval, and AI-powered question answering to your Phoenix applications. Whether you're building a documentation search, customer support chatbot, or knowledge management system, Arcana provides the tools you need.
+
+## What is Arcana?
+
+Arcana enables you to build intelligent search and question-answering features that leverage your own data. It ingests documents, creates semantic embeddings, and provides both simple and advanced RAG pipelines for retrieving and generating answers from your knowledge base.
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Get started with Arcana in your Phoenix app using Igniter or manual setup
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first RAG application with a complete working example
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/core-concepts/rag-pipeline">
+    Understand chunking, embeddings, vector search, and RAG pipelines
+  </Card>
+  <Card title="Guides" icon="map" href="/guides/agentic-rag">
+    Explore advanced features like Agentic RAG, GraphRAG, and re-ranking
+  </Card>
+</CardGroup>
+
+## Key Features
+
+Arcana is designed to be both simple for basic use cases and powerful for advanced workflows:
+
+### Simple API
+
+Get started with just three functions:
+
+```elixir
+# Ingest a document
+Arcana.ingest("Your content here", repo: MyApp.Repo)
+
+# Search for relevant information
+Arcana.search("your query", repo: MyApp.Repo)
+
+# Ask questions with AI
+Arcana.ask("What is X?", repo: MyApp.Repo, llm: "openai:gpt-4o-mini")
+```
+
+### Agentic RAG Pipeline
+
+Build sophisticated workflows with query expansion, decomposition, re-ranking, and self-correction:
+
+```elixir
+alias Arcana.Agent
+
+ctx =
+  Agent.new("Compare Elixir and Erlang features")
+  |> Agent.gate()        # Skip retrieval if not needed
+  |> Agent.expand()      # Add synonyms and related terms
+  |> Agent.decompose()   # Break into sub-questions
+  |> Agent.search()      # Search each sub-question
+  |> Agent.rerank()      # Score and filter by relevance
+  |> Agent.answer()      # Generate final answer
+```
+
+### Flexible Search Modes
+
+- **Semantic search** - Find conceptually similar content using embeddings
+- **Full-text search** - Traditional keyword matching with PostgreSQL
+- **Hybrid search** - Combine both with Reciprocal Rank Fusion (RRF)
+
+### GraphRAG (Optional)
+
+Enhance retrieval with knowledge graphs:
+
+- Extract entities and relationships from your documents
+- Build community-based summaries with Leiden algorithm
+- Combine vector search with graph traversal using RRF
+
+### Pluggable Components
+
+Replace any component with your own implementation:
+
+- **Embeddings** - Local Bumblebee, OpenAI, Cohere, or custom providers
+- **Vector stores** - pgvector (production) or HNSWLib (in-memory testing)
+- **Chunkers** - Default text splitter or semantic chunking
+- **PDF parsers** - Poppler (default) or custom parsers
+- **LLMs** - OpenAI, Anthropic, or any custom model
+
+### Production Ready
+
+- **Embeddable** - Uses your existing Ecto Repo, no separate database
+- **Telemetry** - Built-in observability for all operations
+- **LiveView Dashboard** - Optional web UI for document management
+- **Evaluation** - Measure retrieval quality with MRR, Recall, Precision metrics
+
+## How Arcana Works
+
+<Frame>
+  <img src="/images/arcana-architecture.svg" alt="Arcana Architecture" />
+</Frame>
+
+### Basic RAG Pipeline
+
+1. **Chunk** - Text is split into overlapping segments (default 450 tokens, 50 overlap)
+2. **Embed** - Each chunk is converted to a vector embedding using configurable providers
+3. **Store** - Embeddings are stored in PostgreSQL with pgvector extension
+4. **Search** - Query embeddings are compared using cosine similarity
+5. **Generate** - Retrieved context is passed to an LLM for answer generation
+
+### Agentic Pipeline (Advanced)
+
+For complex questions, the Agent pipeline provides:
+
+- **Retrieval gating** - Decide if retrieval is needed or answer from knowledge
+- **Query expansion** - Add synonyms and related terms to improve recall
+- **Decomposition** - Split multi-part questions into focused sub-queries
+- **Multi-hop reasoning** - Evaluate results and search again if needed
+- **Re-ranking** - Score chunks by relevance (0-10) and filter low scores
+
+### GraphRAG Enhancement (Optional)
+
+When GraphRAG is enabled:
+
+1. **Extract** - Named entities (people, organizations, technologies) identified via NER or LLM
+2. **Link** - Relationships between entities are detected and stored
+3. **Community** - Entities are clustered using the Leiden algorithm
+4. **Fuse** - Vector search and graph traversal results combined with RRF
+
+## Use Cases
+
+Arcana is ideal for building:
+
+### Documentation Search
+
+Build intelligent documentation search that understands user intent:
+
+```elixir
+# Ingest your docs
+File.read!("docs/getting-started.md")
+|> Arcana.ingest(repo: MyApp.Repo, collection: "documentation")
+
+# Search semantically
+Arcana.search("how to deploy", repo: MyApp.Repo, collection: "documentation")
+```
+
+### Customer Support Chatbots
+
+Answer customer questions using your knowledge base:
+
+```elixir
+Arcana.ask(
+  "How do I reset my password?",
+  repo: MyApp.Repo,
+  collection: "support",
+  llm: "openai:gpt-4o-mini"
+)
+```
+
+### Internal Knowledge Management
+
+Make company knowledge searchable and accessible:
+
+```elixir
+# Ingest various file types
+Arcana.ingest_file("policies/remote-work.pdf", repo: MyApp.Repo)
+Arcana.ingest_file("onboarding/setup.md", repo: MyApp.Repo)
+
+# Search across all documents
+Arcana.search("vacation policy", repo: MyApp.Repo, mode: :hybrid)
+```
+
+### Research and Analysis
+
+Build tools for exploring large document collections:
+
+```elixir
+Agent.new("Compare security approaches in microservices vs monoliths")
+|> Agent.expand()      # Add related terms
+|> Agent.decompose()   # Break into specific questions
+|> Agent.search()      # Search each aspect
+|> Agent.rerank()      # Keep most relevant chunks
+|> Agent.answer()      # Generate comprehensive answer
+```
+
+### Semantic Code Search
+
+Search codebases by concept, not just keywords:
+
+```elixir
+Arcana.ingest(
+  File.read!("lib/my_app/auth.ex"),
+  repo: MyApp.Repo,
+  collection: "codebase",
+  metadata: %{"file" => "lib/my_app/auth.ex", "type" => "elixir"}
+)
+
+Arcana.search(
+  "authentication middleware",
+  repo: MyApp.Repo,
+  collection: "codebase"
+)
+```
+
+## Why Arcana for Elixir?
+
+### Native Elixir Integration
+
+- Built for Phoenix and Ecto from the ground up
+- Uses your existing PostgreSQL database with pgvector
+- No separate vector database to manage
+- Fits naturally into your supervision tree
+
+### Performance
+
+- Leverages Elixir's concurrency for parallel embedding and search
+- Efficient chunking with configurable overlap
+- Hybrid search combines semantic and keyword matching
+- In-memory vector store option for testing
+
+### Flexibility
+
+- Start simple with `ingest/search/ask`
+- Add complexity incrementally with the Agent pipeline
+- Swap any component with custom implementations
+- Support for local embeddings (no API costs) or cloud providers
+
+### Developer Experience
+
+- Clear, composable API with pipes
+- Comprehensive telemetry events
+- LiveView dashboard for visual management
+- Evaluation tools to measure and improve quality
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  Your Phoenix Application                │
+├─────────────────────────────────────────────────────────┤
+│                    Arcana.Agent                          │
+│  (gate → expand → decompose → search → rerank → answer) │
+├─────────────────────────────────────────────────────────┤
+│  Arcana.ingest/2  │  Arcana.search/2  │  Arcana.ask/2   │
+├───────────────────┴───────────────────┴─────────────────┤
+│                                                          │
+│  ┌─────────────┐  ┌─────────────────┐  ┌─────────────┐ │
+│  │   Chunker   │  │   Embeddings    │  │   Search    │ │
+│  │ (splitting) │  │  (Bumblebee/    │  │ (pgvector)  │ │
+│  │             │  │   OpenAI)       │  │             │ │
+│  └─────────────┘  └─────────────────┘  └─────────────┘ │
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│              Your Existing Ecto Repo                     │
+│         PostgreSQL + pgvector extension                  │
+└──────────────────────────────────────────────────────────┘
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Install Arcana" icon="download" href="/installation">
+    Set up Arcana with PostgreSQL, pgvector, and embeddings
+  </Card>
+  <Card title="Build Your First RAG App" icon="code" href="/quickstart">
+    Follow our quickstart to ingest, search, and ask questions
+  </Card>
+  <Card title="Explore Agentic RAG" icon="robot" href="/guides/agentic-rag">
+    Learn about advanced pipelines with query expansion and re-ranking
+  </Card>
+  <Card title="Try the LiveBook Tutorial" icon="play" href="https://livebook.dev/run?url=https%3A%2F%2Fgithub.com%2Fgeorgeguimaraes%2Farcana%2Fblob%2Fmain%2Flivebooks%2Farcana_tutorial.livemd">
+    Interactive tutorial with a Doctor Who corpus
+  </Card>
+</CardGroup>
+
+<Note>
+  **New to RAG?** Check out our [Core Concepts](/core-concepts/rag-pipeline) guide to understand embeddings, vector search, and retrieval augmented generation.
+</Note>

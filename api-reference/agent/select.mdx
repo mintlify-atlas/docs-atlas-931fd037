@@ -1,0 +1,262 @@
+---
+title: Agent.select/2
+description: Select which collection(s) to search for the question
+---
+
+## Function Signature
+
+```elixir
+select(ctx, opts)
+```
+
+Selects which collection(s) to search based on the question content.
+
+## Purpose
+
+By default, uses the LLM to decide which collection(s) are most relevant. Collection descriptions are automatically fetched from the database and passed to the selector.
+
+You can provide a custom selector module or function for deterministic routing.
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()" required>
+  Options for the select step
+</ParamField>
+
+### Options
+
+<ParamField path="collections" type="list(String.t())" required>
+  List of available collection names to choose from
+  
+  The selector will choose a subset of these collections.
+</ParamField>
+
+<ParamField path="selector" type="module | function">
+  Custom selector module or function (default: `Arcana.Agent.Selector.LLM`)
+  
+  - **Module**: Must implement `select/3` callback
+  - **Function**: Signature `fn question, collections, opts -> {:ok, selected, reasoning} | {:error, reason} end`
+</ParamField>
+
+<ParamField path="prompt" type="function">
+  Custom prompt function for LLM selector
+  
+  Only used by the default LLM selector.
+</ParamField>
+
+<ParamField path="context" type="map">
+  User context map passed to custom selectors
+  
+  Use this to pass additional information like user role, team, permissions, etc.
+</ParamField>
+
+<ParamField path="llm" type="function">
+  Override the LLM function for this step
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="collections" type="list(String.t())">
+  The selected collection names. Used by `search/2`.
+</ResponseField>
+
+<ResponseField name="selection_reasoning" type="string | nil">
+  The LLM's reasoning for the selection (if provided)
+</ResponseField>
+
+## Examples
+
+### LLM-Based Selection
+
+```elixir
+# Let the LLM choose which collections to search
+ctx
+|> Arcana.Agent.select(collections: ["docs", "api", "support"])
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer()
+
+ctx.collections
+# => ["docs", "api"]
+
+ctx.selection_reasoning
+# => "Question is about API usage, searching docs and api collections"
+```
+
+### Custom Selector Module
+
+```elixir
+defmodule MyApp.TeamBasedSelector do
+  @behaviour Arcana.Agent.Selector
+
+  @impl true
+  def select(question, collections, opts) do
+    user_context = Keyword.get(opts, :context, %{})
+    team = user_context[:team]
+
+    selected =
+      case team do
+        "engineering" -> ["api", "technical_docs"]
+        "support" -> ["faq", "support_docs"]
+        _ -> ["general"]
+      end
+      |> Enum.filter(&(&1 in collections))
+
+    {:ok, selected, "Selected based on team: #{team}"}
+  end
+end
+
+# Usage
+ctx
+|> Arcana.Agent.select(
+  collections: ["api", "faq", "support_docs", "technical_docs"],
+  selector: MyApp.TeamBasedSelector,
+  context: %{team: user.team}
+)
+```
+
+### Inline Selector Function
+
+```elixir
+ctx
+|> Arcana.Agent.select(
+  collections: ["docs", "api"],
+  selector: fn question, _collections, _opts ->
+    if String.contains?(question, "API") do
+      {:ok, ["api"], "API-related query"}
+    else
+      {:ok, ["docs"], "General documentation query"}
+    end
+  end
+)
+```
+
+### Keyword-Based Routing
+
+```elixir
+defmodule MyApp.KeywordSelector do
+  @behaviour Arcana.Agent.Selector
+
+  @impl true
+  def select(question, collections, _opts) do
+    question_lower = String.downcase(question)
+
+    selected =
+      cond do
+        question_lower =~ ~r/\b(api|endpoint|rest|graphql)\b/ -> ["api"]
+        question_lower =~ ~r/\b(error|bug|issue)\b/ -> ["troubleshooting"]
+        question_lower =~ ~r/\b(install|setup|configure)\b/ -> ["getting_started"]
+        true -> ["docs"]
+      end
+      |> Enum.filter(&(&1 in collections))
+
+    {:ok, selected, "Keyword-based routing"}
+  end
+end
+```
+
+### Permission-Based Selection
+
+```elixir
+ctx
+|> Arcana.Agent.select(
+  collections: ["public", "internal", "confidential"],
+  selector: fn _question, collections, opts ->
+    user_context = Keyword.get(opts, :context, %{})
+    role = user_context[:role]
+
+    allowed =
+      case role do
+        "admin" -> ["public", "internal", "confidential"]
+        "employee" -> ["public", "internal"]
+        _ -> ["public"]
+      end
+      |> Enum.filter(&(&1 in collections))
+
+    {:ok, allowed, "Role-based access: #{role}"}
+  end,
+  context: %{role: current_user.role}
+)
+```
+
+## Collection Descriptions
+
+The selector receives collections with their descriptions from the database:
+
+```elixir
+[
+  {"docs", "General product documentation and guides"},
+  {"api", "API reference and endpoint documentation"},
+  {"support", "Common questions and troubleshooting"}
+]
+```
+
+Descriptions help the LLM make better routing decisions.
+
+## Custom Selector Behaviour
+
+```elixir
+defmodule Arcana.Agent.Selector do
+  @callback select(
+              question :: String.t(),
+              collections :: [{name :: String.t(), description :: String.t() | nil}],
+              opts :: Keyword.t()
+            ) ::
+              {:ok, selected :: [String.t()], reasoning :: String.t() | nil}
+              | {:error, term()}
+end
+```
+
+## Fallback Behavior
+
+If selection fails, falls back to all provided collections:
+
+```elixir
+ctx
+|> Arcana.Agent.select(collections: ["docs", "api"])
+# If selector returns {:error, reason}
+# ctx.collections will be ["docs", "api"]
+```
+
+## Telemetry Event
+
+Emits `[:arcana, :agent, :select]` with metadata:
+
+```elixir
+# Start metadata
+%{
+  question: ctx.question,
+  available_collections: ["docs", "api", "support"],
+  selector: Arcana.Agent.Selector.LLM
+}
+
+# Stop metadata
+%{
+  selected_count: 2,
+  selected_collections: ["docs", "api"]
+}
+```
+
+## When to Use
+
+Use `select/2` when:
+
+- You have multiple collections with different content types
+- You want to reduce search scope for better performance
+- Different users should search different collections
+- You want intelligent routing based on question content
+
+## Performance Considerations
+
+- LLM-based selection adds one LLM call to the pipeline
+- Custom selectors can be much faster (rule-based, keyword-based)
+- Reduces search time by limiting collections
+- Most effective with 3+ collections
+
+## See Also
+
+- [search/2](/api-reference/agent/search) - Uses selected collections
+- [Overview](/api-reference/agent/overview) - Pipeline architecture

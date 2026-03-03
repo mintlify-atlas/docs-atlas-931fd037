@@ -1,0 +1,440 @@
+---
+title: Embedding Configuration
+description: Configure embedding providers for vector search in Arcana
+---
+
+Arcana supports multiple embedding providers for converting text into vector representations. Choose local models for privacy and no API costs, or cloud providers for convenience.
+
+## Quick Start
+
+```elixir
+# config/config.exs
+
+# Default - Local Bumblebee with BGE Small (384 dimensions)
+config :arcana, embedder: :local
+
+# OpenAI embeddings
+config :arcana, embedder: :openai
+
+# Custom embedder module
+config :arcana, embedder: MyApp.CustomEmbedder
+```
+
+## Local Embeddings (Bumblebee)
+
+Local embeddings run on your hardware using Bumblebee and Nx. No API keys required, and your data stays private.
+
+### Basic Configuration
+
+```elixir
+# config/config.exs
+
+# Use default model (BAAI/bge-small-en-v1.5)
+config :arcana, embedder: :local
+
+# Specify a different model
+config :arcana, embedder: {:local, model: "BAAI/bge-large-en-v1.5"}
+```
+
+### Available Models
+
+<Tabs>
+  <Tab title="BGE Models">
+    **Best for general English text**
+
+    | Model | Dimensions | Size | Description |
+    |-------|------------|------|-------------|
+    | `BAAI/bge-small-en-v1.5` | 384 | 133MB | Default, good balance |
+    | `BAAI/bge-base-en-v1.5` | 768 | 438MB | Better accuracy |
+    | `BAAI/bge-large-en-v1.5` | 1024 | 1.3GB | Best accuracy |
+
+    ```elixir
+    config :arcana, embedder: {:local, model: "BAAI/bge-base-en-v1.5"}
+    ```
+  </Tab>
+
+  <Tab title="E5 Models">
+    **Alternative high-quality models**
+
+    | Model | Dimensions | Size | Description |
+    |-------|------------|------|-------------|
+    | `intfloat/e5-small-v2` | 384 | 133MB | Lightweight |
+    | `intfloat/e5-base-v2` | 768 | 438MB | Medium size |
+    | `intfloat/e5-large-v2` | 1024 | 1.3GB | Best accuracy |
+
+    ```elixir
+    config :arcana, embedder: {:local, model: "intfloat/e5-small-v2"}
+    ```
+
+    <Note>
+      E5 models automatically receive `query:` and `passage:` prefixes during search and ingestion. Arcana handles this for you.
+    </Note>
+  </Tab>
+
+  <Tab title="Other Models">
+    **Lightweight alternatives**
+
+    | Model | Dimensions | Size | Use Case |
+    |-------|------------|------|----------|
+    | `thenlper/gte-small` | 384 | 67MB | Smallest, fastest |
+    | `sentence-transformers/all-MiniLM-L6-v2` | 384 | 91MB | Lightweight |
+
+    ```elixir
+    config :arcana, embedder: {:local, model: "thenlper/gte-small"}
+    ```
+  </Tab>
+</Tabs>
+
+### Supervision Tree Setup
+
+Add `Arcana.Embedder.Local` to your application's supervision tree:
+
+```elixir
+# lib/my_app/application.ex
+def start(_type, _args) do
+  children = [
+    MyApp.Repo,
+    Arcana.TaskSupervisor,
+    Arcana.Embedder.Local  # Start local embeddings
+  ]
+
+  opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+  Supervisor.start_link(children, opts)
+end
+```
+
+### Nx Backend Configuration
+
+Local embeddings require an Nx backend. Choose **one** of the following:
+
+<CodeGroup>
+
+```elixir EXLA (Recommended)
+# config/config.exs
+config :nx,
+  default_backend: EXLA.Backend,
+  default_defn_options: [compiler: EXLA]
+
+# mix.exs
+defp deps do
+  [
+    {:exla, "~> 0.9"}
+  ]
+end
+```
+
+```elixir EMLX (Apple Silicon)
+# config/config.exs
+config :nx,
+  default_backend: EMLX.Backend,
+  default_defn_options: [compiler: EMLX]
+
+# mix.exs
+defp deps do
+  [
+    {:emlx, "~> 0.1"}
+  ]
+end
+```
+
+```elixir Torchx
+# config/config.exs
+config :nx,
+  default_backend: {Torchx.Backend, device: :cpu}  # or :mps for Apple Silicon
+
+# mix.exs
+defp deps do
+  [
+    {:torchx, "~> 0.9"}
+  ]
+end
+```
+
+</CodeGroup>
+
+## OpenAI Embeddings
+
+Use OpenAI's embedding models via the [req_llm](https://hex.pm/packages/req_llm) library.
+
+### Configuration
+
+```elixir
+# config/config.exs
+
+# Default model (text-embedding-3-small)
+config :arcana, embedder: :openai
+
+# Custom model
+config :arcana, embedder: {:openai, model: "text-embedding-3-large"}
+```
+
+### Available Models
+
+| Model | Dimensions | Cost (per 1M tokens) |
+|-------|------------|----------------------|
+| `text-embedding-3-small` | 1536 | $0.02 |
+| `text-embedding-3-large` | 3072 | $0.13 |
+| `text-embedding-ada-002` | 1536 | $0.10 |
+
+### API Key Setup
+
+<CodeGroup>
+
+```elixir config/runtime.exs
+# Set OPENAI_API_KEY environment variable
+config :req_llm, :openai,
+  api_key: System.get_env("OPENAI_API_KEY")
+```
+
+```bash .env
+OPENAI_API_KEY=sk-...
+```
+
+</CodeGroup>
+
+### Dependencies
+
+Add `req_llm` to your `mix.exs`:
+
+```elixir
+defp deps do
+  [
+    {:arcana, "~> 1.0"},
+    {:req_llm, "~> 0.3"}
+  ]
+end
+```
+
+## Custom Embedder
+
+Implement the `Arcana.Embedder` behaviour for custom embedding providers (Cohere, Voyage AI, etc.).
+
+### Implementation
+
+```elixir
+defmodule MyApp.CohereEmbedder do
+  @behaviour Arcana.Embedder
+
+  @impl true
+  def embed(text, opts) do
+    api_key = opts[:api_key] || System.get_env("COHERE_API_KEY")
+    model = opts[:model] || "embed-english-v3.0"
+
+    # Call Cohere API
+    case HTTPoison.post(
+      "https://api.cohere.ai/v1/embed",
+      Jason.encode!(%{texts: [text], model: model}),
+      [{"Authorization", "Bearer #{api_key}"}, {"Content-Type", "application/json"}]
+    ) do
+      {:ok, %{body: body}} ->
+        %{"embeddings" => [embedding]} = Jason.decode!(body)
+        {:ok, embedding}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def dimensions(opts) do
+    # Return embedding dimensions for the configured model
+    model = opts[:model] || "embed-english-v3.0"
+    case model do
+      "embed-english-v3.0" -> 1024
+      "embed-english-light-v3.0" -> 384
+      _ -> 1024
+    end
+  end
+
+  # Optional: batch embedding for better performance
+  @impl true
+  def embed_batch(texts, opts) do
+    api_key = opts[:api_key] || System.get_env("COHERE_API_KEY")
+    model = opts[:model] || "embed-english-v3.0"
+
+    case HTTPoison.post(
+      "https://api.cohere.ai/v1/embed",
+      Jason.encode!(%{texts: texts, model: model}),
+      [{"Authorization", "Bearer #{api_key}"}, {"Content-Type", "application/json"}]
+    ) do
+      {:ok, %{body: body}} ->
+        %{"embeddings" => embeddings} = Jason.decode!(body)
+        {:ok, embeddings}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+end
+```
+
+### Configuration
+
+```elixir
+# config/config.exs
+config :arcana, embedder: MyApp.CohereEmbedder
+
+# With options
+config :arcana, embedder: {MyApp.CohereEmbedder, api_key: "...", model: "embed-english-v3.0"}
+```
+
+### Function-Based Embedder
+
+For simple use cases, provide a function directly:
+
+```elixir
+config :arcana, embedder: fn text ->
+  # Your embedding logic
+  {:ok, [0.1, 0.2, 0.3, ...]}
+end
+```
+
+## Changing Embedding Models
+
+When switching to a model with different dimensions:
+
+<Steps>
+  <Step title="Update Configuration">
+    Change the embedder config in `config/config.exs`:
+
+    ```elixir
+    # Before
+    config :arcana, embedder: {:local, model: "BAAI/bge-small-en-v1.5"}
+
+    # After
+    config :arcana, embedder: {:local, model: "BAAI/bge-large-en-v1.5"}
+    ```
+  </Step>
+
+  <Step title="Generate Migration">
+    Run the migration generator:
+
+    ```bash
+    mix arcana.gen.embedding_migration
+    ```
+
+    This creates a migration to resize the vector column.
+  </Step>
+
+  <Step title="Run Migration">
+    Apply the migration:
+
+    ```bash
+    mix ecto.migrate
+    ```
+  </Step>
+
+  <Step title="Re-embed Documents">
+    Re-generate embeddings for all documents:
+
+    ```bash
+    mix arcana.reembed_chunks
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The re-embedding process preserves all your documents and metadata. Only the embedding vectors are regenerated.
+</Note>
+
+## Embedding Intent
+
+Some models (like E5) require different prefixes for queries vs. documents. Arcana handles this automatically:
+
+```elixir
+# During search (intent: :query)
+Embedder.embed(embedder, "what is elixir?", intent: :query)
+# E5 models get: "query: what is elixir?"
+
+# During ingestion (intent: :document)
+Embedder.embed(embedder, "Elixir is a functional language", intent: :document)
+# E5 models get: "passage: Elixir is a functional language"
+```
+
+You don't need to handle this manually - Arcana automatically sets the correct intent.
+
+## Per-Call Override
+
+Override the global embedder configuration for specific operations:
+
+```elixir
+# Use a different embedder for this ingestion
+Arcana.ingest(text,
+  repo: MyApp.Repo,
+  embedder: {:openai, model: "text-embedding-3-large"}
+)
+
+# Override with custom function
+Arcana.ingest(text,
+  repo: MyApp.Repo,
+  embedder: fn text -> {:ok, my_custom_embed(text)} end
+)
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Model download is slow">
+    First-time model downloads from HuggingFace can be slow. Models are cached in `~/.cache/huggingface/` and subsequent loads are instant.
+
+    Pre-download models:
+    ```bash
+    # In IEx
+    Bumblebee.load_model({:hf, "BAAI/bge-small-en-v1.5"})
+    ```
+  </Accordion>
+
+  <Accordion title="Out of memory errors">
+    Large models require significant RAM:
+    - `small` models: ~500MB
+    - `base` models: ~1.5GB
+    - `large` models: ~4GB
+
+    Use a smaller model or add more RAM/swap space.
+  </Accordion>
+
+  <Accordion title="EXLA compilation errors">
+    EXLA requires a C++ compiler. Install build tools:
+
+    ```bash
+    # macOS
+    xcode-select --install
+
+    # Ubuntu/Debian
+    apt-get install build-essential
+
+    # Fedora
+    dnf install gcc gcc-c++
+    ```
+  </Accordion>
+
+  <Accordion title="OpenAI API errors">
+    Ensure `req_llm` is installed and your API key is set:
+
+    ```bash
+    export OPENAI_API_KEY=sk-...
+    ```
+
+    Check the [req_llm documentation](https://hexdocs.pm/req_llm) for troubleshooting.
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+1. **Start with local embeddings** - Free, private, and good quality
+2. **Use `bge-small` for development** - Fast downloads and good results
+3. **Upgrade to `bge-large` for production** - Better accuracy when it matters
+4. **Consider OpenAI for simplicity** - No setup required, scales automatically
+5. **Test different models** - Use evaluation metrics to compare performance
+6. **Match query and document embedders** - Always use the same model for indexing and search
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Vector Stores" icon="database" href="/configuration/vector-stores">
+    Configure storage backends for embeddings
+  </Card>
+  <Card title="Chunkers" icon="scissors" href="/configuration/chunkers">
+    Configure text splitting strategies
+  </Card>
+</CardGroup>

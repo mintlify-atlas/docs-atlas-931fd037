@@ -1,0 +1,207 @@
+---
+title: Basic Usage
+description: Learn the essential patterns for ingesting documents and performing RAG operations with Arcana
+---
+
+Arcana provides three core operations: **ingest** (add documents), **search** (retrieve relevant content), and **ask** (RAG question-answering).
+
+## Ingesting Documents
+
+Ingest adds documents to your vector store, automatically chunking and embedding the content.
+
+<CodeGroup>
+
+```elixir Basic Text
+# Ingest text content
+{:ok, document} = Arcana.ingest("Your content here", repo: MyApp.Repo)
+```
+
+```elixir With Metadata
+# Add metadata for filtering and organization
+{:ok, document} = Arcana.ingest(
+  "Article about Elixir",
+  repo: MyApp.Repo,
+  metadata: %{"author" => "Jane", "category" => "programming"}
+)
+```
+
+```elixir With Source ID
+# Group related content with a source ID
+{:ok, document} = Arcana.ingest(
+  "Chapter 1 content",
+  repo: MyApp.Repo,
+  source_id: "book-123"
+)
+```
+
+```elixir From File
+# Supports .txt, .md, and .pdf files
+{:ok, document} = Arcana.ingest_file("path/to/document.pdf", repo: MyApp.Repo)
+```
+
+</CodeGroup>
+
+<Note>
+PDF support requires a PDF parser. The default uses Poppler's `pdftotext`. See the installation guide for setup instructions.
+</Note>
+
+### Using Collections
+
+Organize documents into collections for better organization and routing:
+
+```elixir
+# Simple collection name
+{:ok, document} = Arcana.ingest(
+  "Product documentation",
+  repo: MyApp.Repo,
+  collection: "products"
+)
+
+# With description (helps Agent.select/2 route queries)
+{:ok, document} = Arcana.ingest(
+  "API reference",
+  repo: MyApp.Repo,
+  collection: %{name: "api", description: "REST API endpoints and parameters"}
+)
+```
+
+<Tip>
+Add descriptions to collections when using the Agent pipeline. The LLM uses these descriptions to route questions to the right collection.
+</Tip>
+
+## Searching
+
+Arcana supports three search modes to match your use case.
+
+### Search Modes
+
+<Tabs>
+  <Tab title="Semantic Search">
+    Find content by meaning, not just keywords:
+
+    ```elixir
+    {:ok, results} = Arcana.search("functional programming", repo: MyApp.Repo)
+    ```
+
+    Best for conceptual questions and natural language queries.
+  </Tab>
+  
+  <Tab title="Full-Text Search">
+    Find exact keyword matches:
+
+    ```elixir
+    {:ok, results} = Arcana.search("Elixir", repo: MyApp.Repo, mode: :fulltext)
+    ```
+
+    Best for finding specific terms, names, or code.
+  </Tab>
+  
+  <Tab title="Hybrid Search">
+    Combine both approaches for better coverage:
+
+    ```elixir
+    {:ok, results} = Arcana.search("Elixir patterns", repo: MyApp.Repo, mode: :hybrid)
+    ```
+
+    Recommended default for general-purpose search.
+  </Tab>
+</Tabs>
+
+### Filtering Results
+
+```elixir
+# Limit and threshold
+{:ok, results} = Arcana.search("query",
+  repo: MyApp.Repo,
+  limit: 5,
+  threshold: 0.7  # Minimum similarity score
+)
+
+# Filter by source or collection
+{:ok, results} = Arcana.search("query",
+  repo: MyApp.Repo,
+  source_id: "book-123",
+  collection: "products"
+)
+```
+
+### Hybrid Search Weights (PgVector)
+
+When using the PgVector backend, you can customize how semantic and full-text scores are combined:
+
+```elixir
+# Favor semantic similarity (default: 0.5 each)
+{:ok, results} = Arcana.search("Elixir patterns",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.7,
+  fulltext_weight: 0.3
+)
+
+# Favor keyword matches
+{:ok, results} = Arcana.search("specific_function_name",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.3,
+  fulltext_weight: 0.7
+)
+```
+
+<Note>
+Weight configuration is only available with the PgVector backend. The memory backend uses Reciprocal Rank Fusion (RRF) for hybrid search.
+</Note>
+
+## Question Answering
+
+Use `Arcana.ask/2` to combine search with an LLM for RAG-style question answering:
+
+```elixir
+{:ok, answer} = Arcana.ask("What is Elixir?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini",
+  limit: 5
+)
+```
+
+### Custom Prompts
+
+Control how the LLM generates answers:
+
+```elixir
+custom_prompt = fn question, context ->
+  context_text = Enum.map_join(context, "\n\n", & &1.text)
+  
+  """
+  You are a helpful assistant. Answer based only on the provided context.
+  Be concise and cite specific passages.
+
+  Context:
+  #{context_text}
+
+  Question: #{question}
+  """
+end
+
+{:ok, answer} = Arcana.ask("What is Elixir?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini",
+  prompt: custom_prompt
+)
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="LLM Integration" icon="brain" href="/guides/llm-integration">
+    Connect Arcana to OpenAI, Anthropic, and other LLM providers
+  </Card>
+  <Card title="Agentic RAG" icon="robot" href="/guides/agentic-rag">
+    Build sophisticated multi-step RAG pipelines
+  </Card>
+  <Card title="Search Algorithms" icon="magnifying-glass" href="/guides/search-algorithms">
+    Understand how each search mode works under the hood
+  </Card>
+  <Card title="Dashboard" icon="gauge" href="/guides/dashboard">
+    Manage documents and test queries in the web UI
+  </Card>
+</CardGroup>

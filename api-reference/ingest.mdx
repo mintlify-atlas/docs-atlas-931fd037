@@ -1,0 +1,424 @@
+---
+title: "Arcana.Ingest"
+description: "Document ingestion with chunking, embedding, and optional GraphRAG extraction"
+---
+
+The `Arcana.Ingest` module handles document ingestion for Arcana's RAG pipeline. It processes text or files by chunking content, generating embeddings, and optionally extracting entities and relationships for GraphRAG.
+
+## Overview
+
+Ingestion transforms raw content into searchable knowledge:
+
+1. **Parse** - Extract text from files (PDF, Markdown, plain text)
+2. **Chunk** - Split content into semantic segments
+3. **Embed** - Generate vector embeddings for each chunk
+4. **Store** - Persist chunks with embeddings in your database
+5. **Graph** (optional) - Extract entities and relationships for enhanced retrieval
+
+## Functions
+
+### ingest/2
+
+Ingests text content, creating a document with embedded chunks.
+
+```elixir
+ingest(text, opts) :: {:ok, %Arcana.Document{}} | {:error, term()}
+```
+
+<ParamField path="text" type="string" required>
+  The text content to ingest. Can be of any length - it will be automatically chunked.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Ingestion options:
+  
+  <ParamField path="repo" type="module" required>
+    The Ecto repo module to use for database operations. Required unless configured globally via `config :arcana, repo: MyApp.Repo`.
+  </ParamField>
+  
+  <ParamField path="source_id" type="string">
+    Optional identifier for grouping or filtering documents. Useful for tracking document sources (e.g., "user_123", "website_page").
+  </ParamField>
+  
+  <ParamField path="metadata" type="map">
+    Optional metadata map to store with the document. Can contain any key-value pairs for filtering or display purposes.
+  </ParamField>
+  
+  <ParamField path="chunk_size" type="integer" default="1024">
+    Maximum chunk size. The unit depends on the `size_unit` option:
+    - `:characters` - size in characters (default)
+    - `:tokens` - size in tokens
+  </ParamField>
+  
+  <ParamField path="chunk_overlap" type="integer" default="200">
+    Number of characters or tokens to overlap between consecutive chunks. Helps maintain context across chunk boundaries.
+  </ParamField>
+  
+  <ParamField path="size_unit" type="atom" default=":characters">
+    Unit for chunk_size and chunk_overlap: `:characters` or `:tokens`
+  </ParamField>
+  
+  <ParamField path="collection" type="string | map" default='"default"'>
+    Collection to organize the document. Can be:
+    - A string: `"my_collection"`
+    - A map: `%{name: "my_collection", description: "Documentation for X"}`
+    
+    Collections help organize and filter documents in your knowledge base.
+  </ParamField>
+  
+  <ParamField path="graph" type="boolean">
+    Enable or disable GraphRAG entity/relationship extraction for this document. Overrides the global configuration setting.
+  </ParamField>
+  
+  <ParamField path="format" type="atom">
+    Format hint for the chunker (e.g., `:markdown`, `:code`). Some chunkers may use this to improve chunking quality.
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ok" type="{:ok, %Arcana.Document{}}">
+  Returns the created document struct containing:
+  
+  - `id` (binary_id) - Unique identifier for the document
+  - `content` (string) - The original text content
+  - `source_id` (string | nil) - Source identifier if provided
+  - `metadata` (map) - Document metadata
+  - `status` (atom) - Processing status: `:completed`, `:failed`, etc.
+  - `chunk_count` (integer) - Number of chunks created from the document
+  - `collection_id` (binary_id) - ID of the associated collection
+  - `content_type` (string) - MIME type (defaults to "text/plain")
+  - `inserted_at` (DateTime) - Creation timestamp
+  - `updated_at` (DateTime) - Last update timestamp
+</ResponseField>
+
+<ResponseField name="error" type="{:error, term()}">
+  Returns an error tuple if ingestion fails. Common errors:
+  - `{:error, {:embedding_failed, reason}}` - Failed to generate embeddings
+  - `{:error, :invalid_text}` - Text is nil or empty
+</ResponseField>
+
+**Examples:**
+
+```elixir
+# Basic text ingestion
+{:ok, document} = Arcana.Ingest.ingest(
+  "Elixir is a dynamic, functional language for building scalable applications.",
+  repo: MyApp.Repo
+)
+
+IO.inspect(document.chunk_count)
+# 1
+
+# Long article with metadata
+{:ok, document} = Arcana.Ingest.ingest(
+  article_text,
+  repo: MyApp.Repo,
+  source_id: "blog_post_456",
+  metadata: %{
+    title: "Introduction to Elixir",
+    author: "Jane Doe",
+    published_at: ~D[2024-01-15],
+    tags: ["elixir", "programming", "functional"]
+  },
+  chunk_size: 512,
+  chunk_overlap: 100
+)
+
+# Organize in a collection with description
+{:ok, document} = Arcana.Ingest.ingest(
+  technical_docs,
+  repo: MyApp.Repo,
+  collection: %{
+    name: "api_documentation",
+    description: "REST API reference documentation"
+  },
+  chunk_size: 2048,
+  chunk_overlap: 400
+)
+
+# Token-based chunking
+{:ok, document} = Arcana.Ingest.ingest(
+  code_documentation,
+  repo: MyApp.Repo,
+  chunk_size: 500,
+  size_unit: :tokens,
+  chunk_overlap: 50,
+  format: :code
+)
+
+# Disable GraphRAG for specific document
+{:ok, document} = Arcana.Ingest.ingest(
+  simple_content,
+  repo: MyApp.Repo,
+  graph: false
+)
+```
+
+### ingest_file/2
+
+Ingests a file by parsing its content and creating a document with embedded chunks.
+
+```elixir
+ingest_file(path, opts) :: {:ok, %Arcana.Document{}} | {:error, term()}
+```
+
+<ParamField path="path" type="string" required>
+  Absolute or relative path to the file to ingest. Supported formats:
+  - Plain text (`.txt`)
+  - Markdown (`.md`, `.markdown`)
+  - PDF (`.pdf`)
+  - Other formats via custom parsers
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Same options as `ingest/2`:
+  
+  <ParamField path="repo" type="module" required>
+    The Ecto repo to use
+  </ParamField>
+  
+  <ParamField path="source_id" type="string">
+    Optional source identifier
+  </ParamField>
+  
+  <ParamField path="metadata" type="map">
+    Optional metadata map
+  </ParamField>
+  
+  <ParamField path="chunk_size" type="integer" default="1024">
+    Maximum chunk size
+  </ParamField>
+  
+  <ParamField path="chunk_overlap" type="integer" default="200">
+    Overlap between chunks
+  </ParamField>
+  
+  <ParamField path="collection" type="string | map" default='"default"'>
+    Collection name or map
+  </ParamField>
+  
+  <ParamField path="graph" type="boolean">
+    Enable/disable GraphRAG extraction
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ok" type="{:ok, %Arcana.Document{}}">
+  Returns the created document with additional fields:
+  - `file_path` (string) - Path to the ingested file
+  - `content_type` (string) - Detected MIME type (e.g., "text/markdown", "application/pdf")
+</ResponseField>
+
+<ResponseField name="error" type="{:error, term()}">
+  Returns an error tuple if file processing fails:
+  - `{:error, :file_not_found}` - File doesn't exist
+  - `{:error, :parse_failed}` - Failed to parse file
+  - `{:error, {:embedding_failed, reason}}` - Embedding generation failed
+</ResponseField>
+
+**Examples:**
+
+```elixir
+# Ingest a markdown file
+{:ok, document} = Arcana.Ingest.ingest_file(
+  "./docs/README.md",
+  repo: MyApp.Repo,
+  collection: "documentation"
+)
+
+IO.inspect(document.content_type)
+# "text/markdown"
+
+IO.inspect(document.file_path)
+# "./docs/README.md"
+
+# Ingest a PDF with metadata
+{:ok, document} = Arcana.Ingest.ingest_file(
+  "/path/to/annual_report.pdf",
+  repo: MyApp.Repo,
+  source_id: "report_2024",
+  metadata: %{
+    year: 2024,
+    department: "finance",
+    confidential: false
+  },
+  chunk_size: 2048,
+  chunk_overlap: 400
+)
+
+# Ingest multiple files in a loop
+for file <- Path.wildcard("docs/**/*.md") do
+  {:ok, _doc} = Arcana.Ingest.ingest_file(
+    file,
+    repo: MyApp.Repo,
+    source_id: "docs_import",
+    metadata: %{file: Path.basename(file)},
+    collection: "knowledge_base"
+  )
+end
+
+# Handle errors
+case Arcana.Ingest.ingest_file(path, repo: MyApp.Repo) do
+  {:ok, document} ->
+    Logger.info("Ingested #{document.chunk_count} chunks")
+    
+  {:error, :file_not_found} ->
+    Logger.error("File not found: #{path}")
+    
+  {:error, reason} ->
+    Logger.error("Ingestion failed: #{inspect(reason)}")
+end
+```
+
+## Chunking Strategies
+
+Arcana supports different chunking strategies via the configured chunker:
+
+### Character-based Chunking
+
+Split text by character count with overlap:
+
+```elixir
+Arcana.Ingest.ingest(
+  long_text,
+  repo: MyApp.Repo,
+  chunk_size: 1024,        # 1024 characters per chunk
+  chunk_overlap: 200,      # 200 character overlap
+  size_unit: :characters   # explicit (default)
+)
+```
+
+### Token-based Chunking
+
+Split text by token count for better LLM compatibility:
+
+```elixir
+Arcana.Ingest.ingest(
+  documentation,
+  repo: MyApp.Repo,
+  chunk_size: 500,      # 500 tokens per chunk
+  chunk_overlap: 50,    # 50 token overlap
+  size_unit: :tokens
+)
+```
+
+### Format-aware Chunking
+
+Provide format hints for better chunking:
+
+```elixir
+# Markdown-aware chunking (respects headings, lists, code blocks)
+Arcana.Ingest.ingest(
+  markdown_content,
+  repo: MyApp.Repo,
+  format: :markdown
+)
+
+# Code-aware chunking (respects function boundaries, etc.)
+Arcana.Ingest.ingest(
+  source_code,
+  repo: MyApp.Repo,
+  format: :code
+)
+```
+
+## Collections
+
+Collections organize documents in your knowledge base:
+
+```elixir
+# Simple collection name
+Arcana.Ingest.ingest(
+  text,
+  repo: MyApp.Repo,
+  collection: "user_manuals"
+)
+
+# Collection with description
+Arcana.Ingest.ingest(
+  text,
+  repo: MyApp.Repo,
+  collection: %{
+    name: "engineering_docs",
+    description: "Internal engineering documentation and runbooks"
+  }
+)
+
+# Later, filter searches by collection
+Arcana.search(
+  "how to deploy",
+  repo: MyApp.Repo,
+  collection: "engineering_docs"
+)
+```
+
+## GraphRAG Integration
+
+When GraphRAG is enabled, Arcana extracts entities and relationships during ingestion:
+
+```elixir
+# Enable in config.exs
+config :arcana,
+  graph_enabled: true,
+  entity_extractor: {Arcana.Graph.EntityExtractors.LLM, llm: "openai:gpt-4o-mini"}
+
+# Ingest with automatic entity extraction
+{:ok, document} = Arcana.Ingest.ingest(
+  """
+  John Smith is the CEO of Acme Corp, based in San Francisco.
+  The company specializes in cloud infrastructure.
+  """,
+  repo: MyApp.Repo,
+  graph: true  # explicit enable
+)
+
+# Later searches will be enhanced with graph relationships
+Arcana.search(
+  "Tell me about Acme Corp",
+  repo: MyApp.Repo
+)
+# Returns chunks + related entities via graph search
+```
+
+## Telemetry Events
+
+The ingest module emits telemetry events for monitoring:
+
+```elixir
+:telemetry.attach(
+  "my-handler",
+  [:arcana, :ingest, :stop],
+  fn _event, measurements, metadata, _config ->
+    IO.inspect(metadata.chunk_count)
+    IO.inspect(measurements.duration)
+  end,
+  nil
+)
+```
+
+Events:
+- `[:arcana, :ingest, :start]` - Ingestion started
+- `[:arcana, :ingest, :stop]` - Ingestion completed
+- `[:arcana, :ingest, :exception]` - Ingestion failed
+
+## Error Handling
+
+```elixir
+case Arcana.Ingest.ingest(text, repo: MyApp.Repo) do
+  {:ok, document} ->
+    # Success - document.status will be :completed
+    Logger.info("Created document with #{document.chunk_count} chunks")
+    
+  {:error, {:embedding_failed, reason}} ->
+    # Embedding service error (check API key, rate limits, etc.)
+    Logger.error("Embedding failed: #{inspect(reason)}")
+    
+  {:error, reason} ->
+    # Other errors
+    Logger.error("Ingestion failed: #{inspect(reason)}")
+end
+```
+
+## Related Functions
+
+- [Arcana.ingest/2](/api-reference/arcana) - Main module function
+- [Arcana.ingest_file/2](/api-reference/arcana) - Main module function
+- [Arcana.search/2](/api-reference/search) - Search ingested content

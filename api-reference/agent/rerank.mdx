@@ -1,0 +1,349 @@
+---
+title: Agent.rerank/2
+description: Re-rank search results to improve quality before answering
+---
+
+## Function Signature
+
+```elixir
+rerank(ctx, opts \\ [])
+```
+
+Re-ranks search results to improve quality before answering.
+
+## Purpose
+
+Scores each chunk based on relevance to the question, filters by threshold, and re-sorts by score. Uses `Arcana.Reranker.LLM` by default.
+
+Improves answer quality by ensuring only the most relevant chunks are used for generation.
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()">
+  Options for the rerank step
+</ParamField>
+
+### Options
+
+<ParamField path="reranker" type="module | function">
+  Custom reranker module or function (default: `Arcana.Reranker.LLM`)
+  
+  - **Module**: Must implement `rerank/3` callback
+  - **Function**: Signature `fn question, chunks, opts -> {:ok, reranked_chunks} | {:error, reason} end`
+</ParamField>
+
+<ParamField path="threshold" type="integer">
+  Minimum score to keep (default: 7, range 0-10)
+  
+  Chunks scoring below this threshold are filtered out.
+</ParamField>
+
+<ParamField path="prompt" type="function">
+  Custom prompt function for LLM reranker `fn question, chunk_text -> prompt end`
+  
+  Only used by the default LLM reranker.
+</ParamField>
+
+<ParamField path="llm" type="function">
+  Override the LLM function for this step
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="results" type="list(map)">
+  Replaced with reranked chunks. Results are flattened into a single result with collection "reranked".
+</ResponseField>
+
+<ResponseField name="rerank_scores" type="map">
+  Map of chunk ID to rerank score position (higher = better)
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.rerank()
+|> Arcana.Agent.answer()
+
+ctx.rerank_scores
+# => %{1 => 5, 3 => 4, 7 => 3, 2 => 2, 9 => 1}
+```
+
+### With Custom Threshold
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.rerank(threshold: 8)  # More aggressive filtering
+|> Arcana.Agent.answer()
+
+# Only chunks scoring 8+ are kept
+```
+
+### With Multi-Hop Reasoning
+
+```elixir
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.reason(max_iterations: 2)  # Gather more chunks
+|> Arcana.Agent.rerank()                   # Rerank all gathered chunks
+|> Arcana.Agent.answer()
+```
+
+### Custom Reranker Module
+
+```elixir
+defmodule MyApp.CrossEncoderReranker do
+  @behaviour Arcana.Reranker
+
+  @impl true
+  def rerank(question, chunks, opts) do
+    threshold = Keyword.get(opts, :threshold, 0.7)
+
+    reranked =
+      chunks
+      |> Enum.map(fn chunk ->
+        score = cross_encoder_score(question, chunk.text)
+        Map.put(chunk, :rerank_score, score)
+      end)
+      |> Enum.filter(&(&1.rerank_score >= threshold))
+      |> Enum.sort_by(& &1.rerank_score, :desc)
+
+    {:ok, reranked}
+  end
+
+  defp cross_encoder_score(question, text) do
+    # Call cross-encoder model
+    MyML.CrossEncoder.score(question, text)
+  end
+end
+
+# Usage
+ctx
+|> Arcana.Agent.search()
+|> Arcana.Agent.rerank(
+  reranker: MyApp.CrossEncoderReranker,
+  threshold: 0.8
+)
+```
+
+### Inline Reranker Function
+
+```elixir
+ctx
+|> Arcana.Agent.rerank(
+  reranker: fn question, chunks, _opts ->
+    # Simple length-based reranking (longer chunks = better)
+    reranked =
+      chunks
+      |> Enum.sort_by(&String.length(&1.text), :desc)
+      |> Enum.take(5)
+
+    {:ok, reranked}
+  end
+)
+```
+
+### Semantic Similarity Reranker
+
+```elixir
+defmodule MyApp.SemanticReranker do
+  @behaviour Arcana.Reranker
+
+  @impl true
+  def rerank(question, chunks, opts) do
+    threshold = Keyword.get(opts, :threshold, 0.75)
+
+    # Generate question embedding
+    {:ok, question_embedding} = MyApp.Embeddings.embed(question)
+
+    reranked =
+      chunks
+      |> Enum.map(fn chunk ->
+        {:ok, chunk_embedding} = MyApp.Embeddings.embed(chunk.text)
+        similarity = cosine_similarity(question_embedding, chunk_embedding)
+        Map.put(chunk, :similarity, similarity)
+      end)
+      |> Enum.filter(&(&1.similarity >= threshold))
+      |> Enum.sort_by(& &1.similarity, :desc)
+
+    {:ok, reranked}
+  end
+end
+```
+
+### Hybrid Reranker
+
+```elixir
+defmodule MyApp.HybridReranker do
+  @behaviour Arcana.Reranker
+
+  @impl true
+  def rerank(question, chunks, opts) do
+    # Combine multiple signals
+    reranked =
+      chunks
+      |> Enum.map(fn chunk ->
+        semantic_score = semantic_similarity(question, chunk.text)
+        keyword_score = keyword_overlap(question, chunk.text)
+        recency_score = recency_boost(chunk)
+
+        # Weighted combination
+        final_score =
+          semantic_score * 0.5 +
+          keyword_score * 0.3 +
+          recency_score * 0.2
+
+        Map.put(chunk, :final_score, final_score)
+      end)
+      |> Enum.sort_by(& &1.final_score, :desc)
+      |> Enum.take(10)
+
+    {:ok, reranked}
+  end
+end
+```
+
+## Result Transformation
+
+Reranking flattens results into a single result:
+
+```elixir
+# Before rerank (from search with decompose)
+ctx.results = [
+  %{question: "What is GenServer?", collection: "docs", chunks: [c1, c2]},
+  %{question: "What is Agent?", collection: "docs", chunks: [c3, c4]},
+]
+
+# After rerank
+ctx.results = [
+  %{question: "original question", collection: "reranked", chunks: [c3, c1, c4]}
+]
+# c2 was filtered out, c3 scored highest
+```
+
+## Deduplication
+
+Chunks are automatically deduplicated by ID during reranking:
+
+```elixir
+# If multiple search results contain the same chunk
+# It only appears once in reranked results
+```
+
+## Score Mapping
+
+The `rerank_scores` map stores positional scores:
+
+```elixir
+ctx.rerank_scores
+# => %{
+#   3 => 5,  # chunk ID 3 is in position 1 (5 chunks total)
+#   1 => 4,  # chunk ID 1 is in position 2
+#   4 => 3,  # chunk ID 4 is in position 3
+#   # etc.
+# }
+
+# Higher value = higher rank
+```
+
+## Custom Reranker Behaviour
+
+```elixir
+defmodule Arcana.Reranker do
+  @callback rerank(
+              question :: String.t(),
+              chunks :: [map()],
+              opts :: Keyword.t()
+            ) ::
+              {:ok, [map()]} | {:error, term()}
+end
+```
+
+Reranked chunks should:
+- Be a subset of input chunks (filtered)
+- Be sorted by relevance (best first)
+- Maintain the same structure (`id`, `text`, `score`, etc.)
+
+## Telemetry Event
+
+Emits `[:arcana, :agent, :rerank]` with metadata:
+
+```elixir
+# Start metadata
+%{
+  question: ctx.question,
+  reranker: Arcana.Reranker.LLM
+}
+
+# Stop metadata
+%{
+  chunks_before: 20,  # Total chunks before reranking
+  chunks_after: 8     # Chunks after filtering and reranking
+}
+```
+
+## When to Use
+
+Use `rerank/2` when:
+
+- Initial search returns many chunks with varying quality
+- You want to improve precision before answer generation
+- Combining results from multiple searches (decompose, reason)
+- Your embedding model has recall > precision
+
+## Impact on Answer Quality
+
+**Without Reranking:**
+- Answer may include less relevant information
+- More noise in the context
+- Longer context with lower signal
+
+**With Reranking:**
+- Answer focuses on most relevant chunks
+- Higher quality, more focused answers
+- Reduced token usage in answer generation
+
+## Best Practices
+
+1. **Use after reason/2** - Rerank the final merged results
+2. **Tune threshold** - Start with 7, adjust based on quality
+3. **Monitor chunk counts** - Ensure enough chunks pass threshold
+4. **Consider latency** - LLM reranking adds time per chunk
+5. **Use cross-encoders** - More accurate than bi-encoders for reranking
+
+## Trade-offs
+
+**Benefits:**
+- Improved answer quality
+- Better precision
+- Reduced context noise
+- Can filter out irrelevant chunks
+
+**Costs:**
+- LLM-based: High latency (scores each chunk)
+- Cross-encoder: Moderate latency, better accuracy
+- Position in pipeline matters (do last)
+
+## Reranking Strategies
+
+| Strategy | Speed | Accuracy | Use Case |
+|----------|-------|----------|----------|
+| LLM-based | Slow | High | Best quality, low volume |
+| Cross-encoder | Medium | High | Production, balanced |
+| Semantic similarity | Fast | Medium | High volume, speed critical |
+| Keyword overlap | Fastest | Low | Simple queries, real-time |
+| Hybrid | Medium | High | Best of all worlds |
+
+## See Also
+
+- [search/2](/api-reference/agent/search) - Initial retrieval
+- [reason/2](/api-reference/agent/reason) - Multi-hop before reranking
+- [answer/2](/api-reference/agent/answer) - Uses reranked results

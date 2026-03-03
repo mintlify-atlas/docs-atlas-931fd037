@@ -1,0 +1,238 @@
+---
+title: Arcana.Embedder
+description: Behaviour for implementing custom embedding providers
+---
+
+The `Arcana.Embedder` behaviour allows you to implement custom embedding providers for Arcana. Arcana ships with built-in implementations for local Bumblebee models and OpenAI, but you can add support for any embedding service.
+
+## Required Callbacks
+
+### embed/2
+
+Embeds a single text string into a vector representation.
+
+<ParamField path="text" type="String.t()" required>
+  The text to embed
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options passed from configuration or at call time. Common options:
+  - `:intent` - Either `:query` or `:document`. Used by E5 models to add appropriate prefixes
+  - `:api_key` - API key for remote services
+  - `:model` - Specific model identifier
+</ParamField>
+
+**Returns:** `{:ok, [float()]}` on success or `{:error, term()}` on failure.
+
+### dimensions/1
+
+Returns the dimensionality of the embeddings produced by this embedder.
+
+<ParamField path="opts" type="keyword()" required>
+  Options passed from configuration
+</ParamField>
+
+**Returns:** `pos_integer()` - the number of dimensions in the embedding vector.
+
+## Optional Callbacks
+
+### embed_batch/2
+
+Embeds multiple texts in a single batch operation. If not implemented, Arcana falls back to calling `embed/2` sequentially for each text.
+
+<ParamField path="texts" type="[String.t()]" required>
+  List of texts to embed
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options passed from configuration or at call time
+</ParamField>
+
+**Returns:** `{:ok, [[float()]]}` on success or `{:error, term()}` on failure.
+
+## Configuration
+
+Configure your embedder in `config/config.exs`:
+
+```elixir
+# Built-in: Local Bumblebee models
+config :arcana, embedder: :local
+config :arcana, embedder: {:local, model: "BAAI/bge-large-en-v1.5"}
+
+# Built-in: OpenAI
+config :arcana, embedder: :openai
+config :arcana, embedder: {:openai, model: "text-embedding-3-large"}
+
+# Custom module
+config :arcana, embedder: MyApp.CohereEmbedder
+config :arcana, embedder: {MyApp.CohereEmbedder, api_key: "..."}
+
+# Custom function
+config :arcana, embedder: fn text -> {:ok, embedding} end
+```
+
+## Implementation Example
+
+Here's a complete implementation for Cohere embeddings:
+
+```elixir
+defmodule MyApp.CohereEmbedder do
+  @behaviour Arcana.Embedder
+
+  @impl true
+  def embed(text, opts) do
+    api_key = opts[:api_key] || System.get_env("COHERE_API_KEY")
+    model = opts[:model] || "embed-english-v3.0"
+    
+    headers = [
+      {"Authorization", "Bearer #{api_key}"},
+      {"Content-Type", "application/json"}
+    ]
+    
+    body = Jason.encode!(%{
+      texts: [text],
+      model: model,
+      input_type: input_type(opts[:intent])
+    })
+    
+    case HTTPoison.post("https://api.cohere.ai/v1/embed", body, headers) do
+      {:ok, %{status_code: 200, body: response_body}} ->
+        %{"embeddings" => [embedding]} = Jason.decode!(response_body)
+        {:ok, embedding}
+      
+      {:ok, %{status_code: status, body: body}} ->
+        {:error, "Cohere API error #{status}: #{body}"}
+      
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def embed_batch(texts, opts) do
+    api_key = opts[:api_key] || System.get_env("COHERE_API_KEY")
+    model = opts[:model] || "embed-english-v3.0"
+    
+    headers = [
+      {"Authorization", "Bearer #{api_key}"},
+      {"Content-Type", "application/json"}
+    ]
+    
+    body = Jason.encode!(%{
+      texts: texts,
+      model: model,
+      input_type: input_type(opts[:intent])
+    })
+    
+    case HTTPoison.post("https://api.cohere.ai/v1/embed", body, headers) do
+      {:ok, %{status_code: 200, body: response_body}} ->
+        %{"embeddings" => embeddings} = Jason.decode!(response_body)
+        {:ok, embeddings}
+      
+      {:ok, %{status_code: status, body: body}} ->
+        {:error, "Cohere API error #{status}: #{body}"}
+      
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def dimensions(opts) do
+    # Cohere's embed-english-v3.0 produces 1024-dimensional embeddings
+    case opts[:model] do
+      "embed-english-v3.0" -> 1024
+      "embed-multilingual-v3.0" -> 1024
+      "embed-english-light-v3.0" -> 384
+      _ -> 1024
+    end
+  end
+
+  defp input_type(:query), do: "search_query"
+  defp input_type(:document), do: "search_document"
+  defp input_type(_), do: "search_document"
+end
+```
+
+## Built-in Implementation: Local Embedder
+
+The built-in local embedder uses Bumblebee to run HuggingFace models locally:
+
+```elixir
+defmodule Arcana.Embedder.Local do
+  @behaviour Arcana.Embedder
+
+  @default_model "BAAI/bge-small-en-v1.5"
+
+  @impl true
+  def embed(text, opts) do
+    model = Keyword.get(opts, :model, @default_model)
+    intent = Keyword.get(opts, :intent)
+    serving_name = serving_name(model)
+    prepared_text = prepare_text(text, model, intent)
+
+    %{embedding: embedding} = Nx.Serving.batched_run(serving_name, prepared_text)
+    {:ok, Nx.to_flat_list(embedding)}
+  end
+
+  @impl true
+  def dimensions(opts) do
+    model = Keyword.get(opts, :model, @default_model)
+    # Return known dimensions or detect by embedding test text
+    Map.get(@model_dimensions, model) || detect_dimensions(opts)
+  end
+
+  # E5 models require prefixes
+  defp prepare_text(text, model, intent) do
+    if e5_model?(model) do
+      case intent do
+        :query -> "query: #{text}"
+        :document -> "passage: #{text}"
+        nil -> "passage: #{text}"
+      end
+    else
+      text
+    end
+  end
+end
+```
+
+## Usage in Code
+
+You can override the configured embedder at call time:
+
+```elixir
+# Use global config
+Arcana.ingest(text, repo: MyApp.Repo)
+
+# Override with custom embedder
+Arcana.ingest(text, 
+  repo: MyApp.Repo,
+  embedder: {MyApp.CohereEmbedder, api_key: "..."}
+)
+
+# Embed with query intent for search
+Arcana.search("machine learning", 
+  repo: MyApp.Repo,
+  embedder: {:local, model: "intfloat/e5-small-v2"},
+  intent: :query
+)
+```
+
+## Intent Parameter
+
+The `:intent` parameter helps models distinguish between queries and documents:
+
+- **`:query`** - Use when embedding search queries
+- **`:document`** - Use when embedding content to be searched (default)
+
+Some models (like E5) require different prefixes:
+- E5 models add `"query: "` prefix for queries
+- E5 models add `"passage: "` prefix for documents
+
+Other models (like BGE) ignore the intent parameter.
+
+## See Also
+
+- [Arcana.Chunker](/api-reference/behaviours/chunker) - Text chunking behaviour
+- [Arcana.VectorStore](/api-reference/behaviours/vector-store) - Vector storage behaviour

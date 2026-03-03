@@ -1,0 +1,286 @@
+---
+title: Agent.decompose/2
+description: Break a complex question into simpler sub-questions
+---
+
+## Function Signature
+
+```elixir
+decompose(ctx, opts \\ [])
+```
+
+Breaks a complex question into simpler sub-questions that can be searched independently.
+
+## Purpose
+
+Uses the LLM to analyze the question and split it into parts that can be searched independently. Simple questions are returned unchanged.
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()">
+  Options for the decompose step
+</ParamField>
+
+### Options
+
+<ParamField path="decomposer" type="module | function">
+  Custom decomposer module or function (default: `Arcana.Agent.Decomposer.LLM`)
+  
+  - **Module**: Must implement `decompose/2` callback
+  - **Function**: Signature `fn question, opts -> {:ok, [questions]} | {:error, reason} end`
+</ParamField>
+
+<ParamField path="prompt" type="function">
+  Custom prompt function `fn question -> prompt_string end`
+  
+  Only used by the default LLM decomposer.
+</ParamField>
+
+<ParamField path="llm" type="function">
+  Override the LLM function for this step
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="sub_questions" type="list(String.t()) | nil">
+  List of sub-questions. For simple questions, may be a single-item list. Falls back to the original question if decomposition fails.
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```elixir
+ctx = Arcana.Agent.new("How do I set up supervision and handle crashes?")
+|> Arcana.Agent.decompose()
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer()
+
+ctx.sub_questions
+# => [
+#   "How do I set up supervision in Elixir?",
+#   "How do I handle process crashes?"
+# ]
+```
+
+### Simple Question (No Decomposition)
+
+```elixir
+ctx = Arcana.Agent.new("What is GenServer?")
+|> Arcana.Agent.decompose()
+
+ctx.sub_questions
+# => ["What is GenServer?"]  # Single question
+```
+
+### Complex Multi-Part Question
+
+```elixir
+ctx = Arcana.Agent.new(
+  "What are the differences between GenServer, Agent, and Task, and when should I use each?"
+)
+|> Arcana.Agent.decompose()
+
+ctx.sub_questions
+# => [
+#   "What is GenServer and when to use it?",
+#   "What is Agent and when to use it?",
+#   "What is Task and when to use it?",
+#   "Differences between GenServer, Agent, and Task"
+# ]
+```
+
+### Custom Decomposer Module
+
+```elixir
+defmodule MyApp.KeywordDecomposer do
+  @behaviour Arcana.Agent.Decomposer
+
+  @impl true
+  def decompose(question, _opts) do
+    # Split by "and", "or" conjunctions
+    sub_questions =
+      question
+      |> String.split(~r/\b(and|or)\b/i)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 in ["and", "or", ""]))
+
+    if length(sub_questions) > 1 do
+      {:ok, sub_questions}
+    else
+      {:ok, [question]}
+    end
+  end
+end
+
+# Usage
+ctx
+|> Arcana.Agent.decompose(decomposer: MyApp.KeywordDecomposer)
+```
+
+### Inline Decomposer Function
+
+```elixir
+ctx
+|> Arcana.Agent.decompose(
+  decomposer: fn question, _opts ->
+    # Don't decompose, always return as single question
+    {:ok, [question]}
+  end
+)
+```
+
+### Structure-Based Decomposition
+
+```elixir
+defmodule MyApp.StructuredDecomposer do
+  @behaviour Arcana.Agent.Decomposer
+
+  @impl true
+  def decompose(question, _opts) do
+    sub_questions =
+      cond do
+        # "What are X and Y?" pattern
+        question =~ ~r/what are (\w+) and (\w+)/i ->
+          [captures] = Regex.scan(~r/what are (\w+) and (\w+)/i, question)
+          [_, term1, term2] = captures
+          ["What is #{term1}?", "What is #{term2}?"]
+
+        # "How do I X and Y?" pattern
+        question =~ ~r/how .*\band\b/i ->
+          String.split(question, " and ")
+          |> Enum.map(&String.trim/1)
+
+        # No pattern matched
+        true ->
+          [question]
+      end
+
+    {:ok, sub_questions}
+  end
+end
+```
+
+## Impact on Search
+
+The search step uses sub-questions to perform multiple searches:
+
+```elixir
+ctx
+|> Arcana.Agent.decompose()  # Creates 3 sub-questions
+|> Arcana.Agent.search()
+
+# search/2 performs 3 separate searches:
+# 1. "How do I set up supervision?"
+# 2. "How do I handle crashes?"
+# 3. "What are restart strategies?"
+
+ctx.results
+# => [
+#   %{question: "How do I set up supervision?", chunks: [...]},
+#   %{question: "How do I handle crashes?", chunks: [...]},
+#   %{question: "What are restart strategies?", chunks: [...]}
+# ]
+```
+
+## Query Transformation Chain
+
+Decomposition works with other transformations:
+
+```elixir
+ctx
+|> Arcana.Agent.rewrite()    # Clean input
+|> Arcana.Agent.expand()     # Add related terms
+|> Arcana.Agent.decompose()  # Split expanded query into sub-questions
+|> Arcana.Agent.search()     # Search each sub-question
+```
+
+The decomposer receives the effective query (expanded or rewritten).
+
+## Custom Decomposer Behaviour
+
+```elixir
+defmodule Arcana.Agent.Decomposer do
+  @callback decompose(question :: String.t(), opts :: Keyword.t()) ::
+              {:ok, [String.t()]} | {:error, term()}
+end
+```
+
+Implement this behaviour for custom decomposers:
+
+```elixir
+defmodule MyApp.CustomDecomposer do
+  @behaviour Arcana.Agent.Decomposer
+
+  @impl true
+  def decompose(question, opts) do
+    # Your decomposition logic
+    sub_questions = split_question(question)
+    {:ok, sub_questions}
+  end
+end
+```
+
+## Telemetry Event
+
+Emits `[:arcana, :agent, :decompose]` with metadata:
+
+```elixir
+# Start metadata
+%{
+  question: ctx.question,  # Or effective query
+  decomposer: Arcana.Agent.Decomposer.LLM
+}
+
+# Stop metadata
+%{sub_question_count: 3}
+```
+
+## When to Use
+
+Use `decompose/2` when:
+
+- Users ask multi-part questions
+- Complex questions require searching different aspects
+- You want comprehensive answers covering all parts
+- Questions contain "and", "also", multiple clauses
+
+## Examples of Decomposition
+
+| Original | Sub-Questions |
+|----------|---------------|
+| "What is GenServer?" | ["What is GenServer?"] |
+| "How do GenServer and Agent differ?" | ["What is GenServer?", "What is Agent?", "Differences between GenServer and Agent"] |
+| "Set up supervision and handle crashes" | ["How to set up supervision?", "How to handle crashes?"] |
+| "What are the pros and cons of ETS?" | ["What are the advantages of ETS?", "What are the disadvantages of ETS?"] |
+
+## Best Practices
+
+1. **Don't over-decompose** - Too many sub-questions increase search time
+2. **Keep sub-questions independent** - Each should be searchable alone
+3. **Preserve context** - Sub-questions should make sense independently
+4. **Test with real queries** - Validate decomposition quality
+5. **Limit sub-questions** - 2-5 sub-questions is usually optimal
+
+## Trade-offs
+
+**Benefits:**
+- Better coverage of multi-part questions
+- Each part gets dedicated search
+- More comprehensive answers
+
+**Costs:**
+- Multiple searches (N sub-questions = N searches)
+- Increased latency
+- More chunks to synthesize in answer
+- LLM call for decomposition
+
+## See Also
+
+- [search/2](/api-reference/agent/search) - Searches all sub-questions
+- [expand/2](/api-reference/agent/expand) - Can be combined with decompose
+- [answer/2](/api-reference/agent/answer) - Synthesizes results from all sub-questions

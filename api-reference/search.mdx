@@ -1,0 +1,470 @@
+---
+title: "Arcana.Search"
+description: "Semantic, fulltext, and hybrid search with optional GraphRAG enhancement"
+---
+
+The `Arcana.Search` module provides powerful search capabilities across your ingested documents. It supports multiple search modes and can be enhanced with GraphRAG for entity-aware retrieval.
+
+## Overview
+
+Arcana Search offers three search modes:
+
+- **Semantic Search** - Vector similarity using embeddings (default)
+- **Fulltext Search** - Traditional keyword-based text search
+- **Hybrid Search** - Combines semantic and fulltext using Reciprocal Rank Fusion (RRF)
+
+When GraphRAG is enabled, search results are enhanced with entity-based retrieval for improved relevance.
+
+## Functions
+
+### search/2
+
+Searches for chunks similar to the query.
+
+```elixir
+search(query, opts) :: {:ok, [result]} | {:error, term()}
+```
+
+<ParamField path="query" type="string" required>
+  The search query text. For semantic search, this will be embedded and compared against document embeddings. For fulltext, it's matched against text content.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Search options:
+  
+  <ParamField path="repo" type="module" required>
+    The Ecto repo to use. Required when using the pgvector backend (default).
+  </ParamField>
+  
+  <ParamField path="limit" type="integer" default="10">
+    Maximum number of results to return. The actual number may be lower if fewer matches exist.
+  </ParamField>
+  
+  <ParamField path="mode" type="atom" default=":semantic">
+    Search mode:
+    - `:semantic` - Vector similarity search (default)
+    - `:fulltext` - Keyword-based text search
+    - `:hybrid` - Combines both with RRF
+  </ParamField>
+  
+  <ParamField path="source_id" type="string">
+    Filter results to documents with this source_id. Useful for scoping searches to specific document sources.
+  </ParamField>
+  
+  <ParamField path="threshold" type="float" default="0.0">
+    Minimum similarity score (0.0 to 1.0). Results below this score are filtered out. Only applies to semantic search.
+  </ParamField>
+  
+  <ParamField path="collection" type="string">
+    Filter results to a specific collection by name. Use this to search within a subset of documents.
+  </ParamField>
+  
+  <ParamField path="collections" type="list(string)">
+    Filter results to multiple collections. Results are combined and ranked together.
+  </ParamField>
+  
+  <ParamField path="vector_store" type="atom">
+    Override the configured vector store backend (e.g., `:pgvector`, `:qdrant`).
+  </ParamField>
+  
+  <ParamField path="semantic_weight" type="float" default="0.5">
+    Weight for semantic scores in hybrid mode (0.0 to 1.0). Must sum with `fulltext_weight` to 1.0.
+  </ParamField>
+  
+  <ParamField path="fulltext_weight" type="float" default="0.5">
+    Weight for fulltext scores in hybrid mode (0.0 to 1.0). Must sum with `semantic_weight` to 1.0.
+  </ParamField>
+  
+  <ParamField path="rewriter" type="function">
+    Optional query rewriting function: `fn query -> {:ok, rewritten} | {:error, reason} end`. Can expand queries, add synonyms, etc.
+  </ParamField>
+  
+  <ParamField path="graph" type="boolean">
+    Explicitly enable/disable GraphRAG enhancement for this search (overrides config).
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ok" type="{:ok, [result]}">
+  Returns a list of result maps, sorted by score in descending order. Each result contains:
+  
+  - `id` (string) - UUID of the chunk
+  - `text` (string) - The chunk's text content
+  - `document_id` (string) - UUID of the parent document
+  - `chunk_index` (integer) - Position of the chunk within its document (0-based)
+  - `score` (float) - Relevance score (0.0 to 1.0 for semantic, varies for fulltext)
+  - `semantic_score` (float, hybrid only) - Semantic component score
+  - `fulltext_score` (float, hybrid only) - Fulltext component score
+</ResponseField>
+
+<ResponseField name="error" type="{:error, term()}">
+  Returns an error tuple if search fails:
+  - `{:error, {:embedding_failed, reason}}` - Failed to embed the query (semantic/hybrid mode)
+  - `{:error, reason}` - Other errors
+</ResponseField>
+
+**Examples:**
+
+```elixir
+# Basic semantic search
+{:ok, results} = Arcana.Search.search(
+  "What is functional programming?",
+  repo: MyApp.Repo
+)
+
+Enum.each(results, fn result ->
+  IO.puts("Score: #{result.score}")
+  IO.puts("Text: #{result.text}\n")
+end)
+
+# Output:
+# Score: 0.89
+# Text: Functional programming is a paradigm that treats computation as...
+#
+# Score: 0.84
+# Text: In functional languages like Elixir, functions are first-class...
+
+# Fulltext search
+{:ok, results} = Arcana.Search.search(
+  "elixir phoenix",
+  repo: MyApp.Repo,
+  mode: :fulltext,
+  limit: 5
+)
+
+# Hybrid search with custom weights
+{:ok, results} = Arcana.Search.search(
+  "concurrent programming patterns",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.7,  # Favor semantic matching
+  fulltext_weight: 0.3,
+  limit: 10
+)
+
+IO.inspect(List.first(results))
+# %{
+#   id: "550e8400-e29b-41d4-a716-446655440000",
+#   text: "Elixir provides lightweight processes for concurrency...",
+#   document_id: "660e8400-e29b-41d4-a716-446655440000",
+#   chunk_index: 3,
+#   score: 0.87,
+#   semantic_score: 0.91,
+#   fulltext_score: 0.76
+# }
+
+# Search with filters
+{:ok, results} = Arcana.Search.search(
+  "deployment strategies",
+  repo: MyApp.Repo,
+  collection: "engineering_docs",
+  source_id: "runbooks",
+  threshold: 0.75,  # Only high-confidence matches
+  limit: 3
+)
+
+# Search across multiple collections
+{:ok, results} = Arcana.Search.search(
+  "API authentication",
+  repo: MyApp.Repo,
+  collections: ["api_docs", "security_guides"],
+  mode: :hybrid
+)
+```
+
+## Search Modes
+
+### Semantic Search (Default)
+
+Uses vector embeddings to find conceptually similar content:
+
+```elixir
+# These queries will match similar concepts, not just keywords
+Arcana.Search.search(
+  "error handling",  # Matches "exception management", "failure recovery", etc.
+  repo: MyApp.Repo,
+  mode: :semantic
+)
+```
+
+**Best for:**
+- Conceptual similarity
+- Natural language queries
+- Finding related topics
+- Handling synonyms automatically
+
+**Configuration:**
+```elixir
+config :arcana,
+  embedder: {Arcana.Embedders.OpenAI, model: "text-embedding-3-small"}
+```
+
+### Fulltext Search
+
+Traditional keyword-based search using PostgreSQL's fulltext capabilities:
+
+```elixir
+# Matches exact keywords and stems
+Arcana.Search.search(
+  "GenServer callback",  # Matches documents containing these terms
+  repo: MyApp.Repo,
+  mode: :fulltext
+)
+```
+
+**Best for:**
+- Exact keyword matching
+- Technical terms and identifiers
+- Code snippets
+- Faster searches (no embedding required)
+
+### Hybrid Search
+
+Combines semantic and fulltext using Reciprocal Rank Fusion (RRF):
+
+```elixir
+# Gets best of both worlds
+Arcana.Search.search(
+  "GenServer concurrent state",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.6,  # Slightly favor concepts
+  fulltext_weight: 0.4   # But also match keywords
+)
+```
+
+**Best for:**
+- General purpose search
+- Balancing precision and recall
+- Queries with both concepts and specific terms
+
+**How it works:**
+1. Performs both semantic and fulltext searches
+2. Ranks results from each independently
+3. Combines using RRF with configured weights
+4. Returns unified, re-ranked results
+
+## GraphRAG Enhancement
+
+When GraphRAG is enabled, searches are enhanced with entity-based retrieval:
+
+```elixir
+# Configure GraphRAG
+config :arcana,
+  graph_enabled: true,
+  entity_extractor: {Arcana.Graph.EntityExtractors.LLM, llm: "openai:gpt-4o-mini"}
+
+# Searches automatically extract entities and enhance results
+{:ok, results} = Arcana.Search.search(
+  "Tell me about Acme Corp",
+  repo: MyApp.Repo
+)
+
+# How it works:
+# 1. Extracts entities from query ("Acme Corp")
+# 2. Performs vector search
+# 3. Queries graph database for entity relationships
+# 4. Combines results using RRF
+# 5. Returns enhanced, entity-aware results
+```
+
+**Benefits:**
+- Better results for entity-centric queries
+- Follows relationships ("CEO of X", "located in Y")
+- Improves precision for proper nouns
+- Leverages knowledge graph structure
+
+## Query Rewriting
+
+Improve search quality by rewriting queries before search:
+
+```elixir
+def my_rewriter(query) do
+  # Expand abbreviations, add synonyms, etc.
+  expanded = String.replace(query, "ML", "machine learning")
+  {:ok, expanded}
+end
+
+Arcana.Search.search(
+  "ML models",
+  repo: MyApp.Repo,
+  rewriter: &my_rewriter/1
+)
+# Actually searches for "machine learning models"
+```
+
+Or use the dedicated function:
+
+```elixir
+Arcana.Search.rewrite_query(
+  "How do I deploy?",
+  rewriter: fn query ->
+    # Use LLM to expand query
+    {:ok, "deployment strategies production environment best practices"}
+  end
+)
+```
+
+### rewrite_query/2
+
+Rewrites a query using a provided rewriter function.
+
+```elixir
+rewrite_query(query, opts \\ []) :: {:ok, rewritten} | {:error, reason}
+```
+
+<ParamField path="query" type="string" required>
+  The query to rewrite
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  <ParamField path="rewriter" type="function" required>
+    Function that takes a query and returns `{:ok, rewritten}` or `{:error, reason}`
+  </ParamField>
+</ParamField>
+
+**Example:**
+
+```elixir
+defmodule MyApp.QueryRewriter do
+  def rewrite(query) do
+    # Expand common abbreviations
+    expanded =
+      query
+      |> String.replace(~r/\bML\b/i, "machine learning")
+      |> String.replace(~r/\bAI\b/i, "artificial intelligence")
+      |> String.replace(~r/\bAPI\b/i, "application programming interface")
+    
+    {:ok, expanded}
+  end
+end
+
+{:ok, rewritten} = Arcana.Search.rewrite_query(
+  "ML API best practices",
+  rewriter: &MyApp.QueryRewriter.rewrite/1
+)
+
+IO.puts(rewritten)
+# "machine learning application programming interface best practices"
+```
+
+## Advanced Filtering
+
+### By Source
+
+```elixir
+# Only search documents from a specific source
+Arcana.Search.search(
+  "pricing",
+  repo: MyApp.Repo,
+  source_id: "website_docs"
+)
+```
+
+### By Collection
+
+```elixir
+# Search within a single collection
+Arcana.Search.search(
+  "authentication",
+  repo: MyApp.Repo,
+  collection: "api_docs"
+)
+
+# Search across multiple collections
+Arcana.Search.search(
+  "security",
+  repo: MyApp.Repo,
+  collections: ["api_docs", "security_guides", "compliance"]
+)
+```
+
+### By Threshold
+
+```elixir
+# Only return high-confidence matches
+Arcana.Search.search(
+  "concurrency",
+  repo: MyApp.Repo,
+  mode: :semantic,
+  threshold: 0.8  # Only matches with 80%+ similarity
+)
+```
+
+## Performance Optimization
+
+### Adjust Limits
+
+```elixir
+# For quick, high-precision results
+Arcana.Search.search(query, repo: MyApp.Repo, limit: 3)
+
+# For comprehensive results
+Arcana.Search.search(query, repo: MyApp.Repo, limit: 50)
+```
+
+### Choose the Right Mode
+
+```elixir
+# Fastest: Fulltext (no embedding needed)
+Arcana.Search.search(query, repo: MyApp.Repo, mode: :fulltext)
+
+# Balanced: Semantic
+Arcana.Search.search(query, repo: MyApp.Repo, mode: :semantic)
+
+# Comprehensive: Hybrid (slowest, but best results)
+Arcana.Search.search(query, repo: MyApp.Repo, mode: :hybrid)
+```
+
+## Telemetry Events
+
+Monitor search performance with telemetry:
+
+```elixir
+:telemetry.attach(
+  "search-handler",
+  [:arcana, :search, :stop],
+  fn _event, measurements, metadata, _config ->
+    IO.puts("Search took #{measurements.duration}ns")
+    IO.puts("Found #{metadata.result_count} results")
+    if metadata[:graph_enhanced] do
+      IO.puts("Enhanced with #{metadata.entities_found} entities")
+    end
+  end,
+  nil
+)
+```
+
+Events:
+- `[:arcana, :search, :start]` - Search started
+- `[:arcana, :search, :stop]` - Search completed
+- `[:arcana, :search, :exception]` - Search failed
+- `[:arcana, :graph, :search, :start]` - GraphRAG enhancement started
+- `[:arcana, :graph, :search, :stop]` - GraphRAG enhancement completed
+
+## Error Handling
+
+```elixir
+case Arcana.Search.search(query, repo: MyApp.Repo) do
+  {:ok, results} ->
+    if Enum.empty?(results) do
+      {:ok, "No results found"}
+    else
+      {:ok, results}
+    end
+    
+  {:error, {:embedding_failed, reason}} ->
+    Logger.error("Failed to embed query: #{inspect(reason)}")
+    # Fall back to fulltext?
+    Arcana.Search.search(query, repo: MyApp.Repo, mode: :fulltext)
+    
+  {:error, reason} ->
+    Logger.error("Search failed: #{inspect(reason)}")
+    {:error, reason}
+end
+```
+
+## Related Functions
+
+- [Arcana.search/2](/api-reference/arcana) - Main module function
+- [Arcana.ask/2](/api-reference/ask) - RAG question answering with search
+- [Arcana.ingest/2](/api-reference/ingest) - Ingest documents for searching

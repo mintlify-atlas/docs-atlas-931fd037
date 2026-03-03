@@ -1,0 +1,553 @@
+---
+title: "Arcana.Ask"
+description: "RAG question answering with retrieval and LLM generation"
+---
+
+The `Arcana.Ask` module implements the complete RAG (Retrieval Augmented Generation) workflow for question answering. It retrieves relevant context from your knowledge base and uses an LLM to generate accurate, grounded answers.
+
+## Overview
+
+The RAG workflow consists of three steps:
+
+1. **Retrieve** - Search for relevant context chunks using Arcana.Search
+2. **Augment** - Build a prompt with the retrieved context
+3. **Generate** - Use an LLM to generate an answer based on the context
+
+This approach ensures answers are grounded in your actual documentation rather than relying solely on the LLM's training data.
+
+## Function
+
+### ask/2
+
+Asks a question using retrieved context from the knowledge base.
+
+```elixir
+ask(question, opts) :: {:ok, answer, context} | {:error, term()}
+```
+
+<ParamField path="question" type="string" required>
+  The question to ask. This will be used to search for relevant context and passed to the LLM.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Ask options:
+  
+  <ParamField path="repo" type="module" required>
+    The Ecto repo to use for searching the knowledge base. Required unless configured globally via `config :arcana, repo: MyApp.Repo`.
+  </ParamField>
+  
+  <ParamField path="llm" type="term" required>
+    LLM implementing the `Arcana.LLM` protocol. Can be:
+    - A string: `"openai:gpt-4o-mini"`, `"anthropic:claude-3-5-sonnet"`
+    - A configured module: `{MyApp.CustomLLM, opts}`
+    - Any implementation of `Arcana.LLM.complete/4`
+    
+    Required unless configured globally via `config :arcana, llm: "openai:gpt-4o-mini"`.
+  </ParamField>
+  
+  <ParamField path="limit" type="integer" default="5">
+    Maximum number of context chunks to retrieve. More context provides better answers but increases LLM costs and latency.
+  </ParamField>
+  
+  <ParamField path="mode" type="atom" default=":semantic">
+    Search mode for context retrieval:
+    - `:semantic` - Vector similarity search (default)
+    - `:fulltext` - Keyword-based search
+    - `:hybrid` - Combines both modes
+  </ParamField>
+  
+  <ParamField path="source_id" type="string">
+    Filter context to documents with this source_id. Useful for scoping answers to specific document sources.
+  </ParamField>
+  
+  <ParamField path="threshold" type="float" default="0.0">
+    Minimum similarity score for context chunks (0.0 to 1.0). Filters out low-quality context.
+  </ParamField>
+  
+  <ParamField path="collection" type="string">
+    Filter context to a specific collection by name. Use this to answer questions from a subset of documents.
+  </ParamField>
+  
+  <ParamField path="collections" type="list(string)">
+    Filter context to multiple collections. Context is retrieved from all specified collections.
+  </ParamField>
+  
+  <ParamField path="prompt" type="function">
+    Custom prompt function with signature: `fn question, context -> system_prompt_string end`
+    
+    Use this to customize how context is presented to the LLM. The default prompt instructs the LLM to answer based on the provided context.
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ok" type="{:ok, answer, context}">
+  Returns a tuple with:
+  
+  - `answer` (string) - The LLM's generated response
+  - `context` (list) - The context chunks that were provided to the LLM. Each chunk is a map with:
+    - `id` - Chunk UUID
+    - `text` - Chunk text content
+    - `document_id` - Parent document UUID
+    - `chunk_index` - Position in document
+    - `score` - Relevance score
+</ResponseField>
+
+<ResponseField name="error" type="{:error, term()}">
+  Returns an error tuple if the ask operation fails:
+  - `{:error, :no_llm_configured}` - No LLM specified in options or config
+  - `{:error, {:search_failed, reason}}` - Failed to retrieve context
+  - `{:error, reason}` - LLM generation failed
+</ResponseField>
+
+**Examples:**
+
+```elixir
+# Basic question answering
+{:ok, answer, context} = Arcana.Ask.ask(
+  "What is Elixir?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini"
+)
+
+IO.puts(answer)
+# "Elixir is a dynamic, functional programming language designed for building 
+# scalable and maintainable applications. It runs on the Erlang VM..."
+
+IO.puts("Used #{length(context)} context chunks")
+# "Used 3 context chunks"
+
+# With more context
+{:ok, answer, _context} = Arcana.Ask.ask(
+  "How does Elixir handle concurrency?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o",
+  limit: 10  # Retrieve more context for complex questions
+)
+
+# Scoped to a collection
+{:ok, answer, _} = Arcana.Ask.ask(
+  "How do I authenticate API requests?",
+  repo: MyApp.Repo,
+  llm: "anthropic:claude-3-5-sonnet",
+  collection: "api_documentation"
+)
+
+# With custom prompt
+{:ok, answer, _} = Arcana.Ask.ask(
+  "Summarize the deployment process",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini",
+  prompt: fn question, context ->
+    context_text = Enum.map_join(context, "\n\n", & &1.text)
+    """
+    You are a technical writer creating documentation.
+    Be concise and use bullet points.
+    
+    Question: #{question}
+    
+    Documentation:
+    #{context_text}
+    """
+  end
+)
+
+# Multiple collections with hybrid search
+{:ok, answer, context} = Arcana.Ask.ask(
+  "What are the security best practices?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o",
+  collections: ["security_guides", "api_docs", "compliance"],
+  mode: :hybrid,
+  limit: 8
+)
+```
+
+## Custom Prompts
+
+The default prompt instructs the LLM to answer based on context:
+
+```elixir
+# Default prompt (built-in)
+"""
+Answer the user's question based on the following context.
+If the answer is not in the context, say you don't know.
+
+Context:
+[retrieved chunks]
+"""
+```
+
+Customize the prompt for different use cases:
+
+### Technical Documentation
+
+```elixir
+defmodule MyApp.Prompts do
+  def technical_docs(_question, context) do
+    context_text = Enum.map_join(context, "\n\n---\n\n", & &1.text)
+    
+    """
+    You are a technical documentation expert.
+    
+    Instructions:
+    - Answer based only on the provided documentation
+    - Include code examples when available
+    - Be precise and accurate
+    - If unsure, say "The documentation doesn't specify"
+    
+    Documentation:
+    #{context_text}
+    """
+  end
+end
+
+Arcana.Ask.ask(
+  question,
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o",
+  prompt: &MyApp.Prompts.technical_docs/2
+)
+```
+
+### Conversational Support
+
+```elixir
+def support_bot(_question, context) do
+  context_text = Enum.map_join(context, "\n\n", & &1.text)
+  
+  """
+  You are a friendly customer support assistant.
+  
+  Instructions:
+  - Answer helpfully based on the knowledge base below
+  - Be conversational and empathetic
+  - If you can't help, suggest contacting support
+  - Provide step-by-step instructions when appropriate
+  
+  Knowledge Base:
+  #{context_text}
+  """
+end
+```
+
+### Summarization
+
+```elixir
+def summarizer(question, context) do
+  context_text = Enum.map_join(context, "\n\n", & &1.text)
+  
+  """
+  Create a concise summary answering: #{question}
+  
+  Requirements:
+  - Use bullet points
+  - Maximum 3-5 key points
+  - Be factual and concise
+  
+  Source Material:
+  #{context_text}
+  """
+end
+```
+
+### Citation-Aware
+
+```elixir
+def with_citations(_question, context) do
+  # Build context with chunk IDs for citation
+  context_text =
+    context
+    |> Enum.with_index(1)
+    |> Enum.map_join("\n\n", fn {chunk, idx} ->
+      "[#{idx}] #{chunk.text}"
+    end)
+  
+  """
+  Answer the question using the provided sources.
+  Cite sources using [1], [2], etc. after each claim.
+  
+  Sources:
+  #{context_text}
+  """
+end
+
+{:ok, answer, context} = Arcana.Ask.ask(
+  "What are the benefits?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o",
+  prompt: &with_citations/2
+)
+
+IO.puts(answer)
+# "The main benefits include scalability [1], fault tolerance [2], 
+# and developer productivity [1][3]."
+```
+
+## Search Configuration
+
+The `ask/2` function uses `Arcana.Search` under the hood. All search options are supported:
+
+### Semantic Search (Default)
+
+```elixir
+Arcana.Ask.ask(
+  "What is pattern matching?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini",
+  mode: :semantic,  # explicit, but this is default
+  limit: 5
+)
+```
+
+### Fulltext Search
+
+```elixir
+# Good for exact keyword matching
+Arcana.Ask.ask(
+  "GenServer callback documentation",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o",
+  mode: :fulltext
+)
+```
+
+### Hybrid Search
+
+```elixir
+# Best of both worlds
+Arcana.Ask.ask(
+  "How do I deploy to production?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o",
+  mode: :hybrid
+)
+```
+
+### High-Quality Context Only
+
+```elixir
+# Only use highly relevant context
+Arcana.Ask.ask(
+  question,
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o",
+  threshold: 0.8,  # Only chunks with 80%+ similarity
+  limit: 3
+)
+```
+
+## LLM Configuration
+
+Arcana.Ask works with any LLM implementing the `Arcana.LLM` protocol:
+
+### String Format
+
+```elixir
+# OpenAI
+Arcana.Ask.ask(question, repo: MyApp.Repo, llm: "openai:gpt-4o-mini")
+Arcana.Ask.ask(question, repo: MyApp.Repo, llm: "openai:gpt-4o")
+
+# Anthropic
+Arcana.Ask.ask(question, repo: MyApp.Repo, llm: "anthropic:claude-3-5-sonnet")
+Arcana.Ask.ask(question, repo: MyApp.Repo, llm: "anthropic:claude-3-5-haiku")
+```
+
+### Module Configuration
+
+```elixir
+# With options
+Arcana.Ask.ask(
+  question,
+  repo: MyApp.Repo,
+  llm: {Arcana.LLM.OpenAI, model: "gpt-4o", temperature: 0.7}
+)
+
+# Custom implementation
+Arcana.Ask.ask(
+  question,
+  repo: MyApp.Repo,
+  llm: {MyApp.CustomLLM, api_key: "...", endpoint: "..."}
+)
+```
+
+### Global Configuration
+
+```elixir
+# config/config.exs
+config :arcana,
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini"
+
+# Now you can omit repo and llm
+Arcana.Ask.ask("What is Elixir?")
+```
+
+## Working with Context
+
+The returned context can be used for various purposes:
+
+### Display Sources
+
+```elixir
+{:ok, answer, context} = Arcana.Ask.ask(question, repo: MyApp.Repo, llm: llm)
+
+IO.puts(answer)
+IO.puts("\n---\nSources:")
+
+Enum.each(context, fn chunk ->
+  IO.puts("\n- Score: #{Float.round(chunk.score, 2)}")
+  IO.puts("  Document: #{chunk.document_id}")
+  IO.puts("  Text: #{String.slice(chunk.text, 0..100)}...")
+end)
+```
+
+### Confidence Scoring
+
+```elixir
+{:ok, answer, context} = Arcana.Ask.ask(question, repo: MyApp.Repo, llm: llm)
+
+avg_score = Enum.reduce(context, 0.0, & &1.score + &2) / length(context)
+
+confidence = 
+  cond do
+    avg_score > 0.8 -> "high"
+    avg_score > 0.6 -> "medium"
+    true -> "low"
+  end
+
+IO.puts("Answer confidence: #{confidence}")
+```
+
+### Link to Original Documents
+
+```elixir
+{:ok, answer, context} = Arcana.Ask.ask(question, repo: MyApp.Repo, llm: llm)
+
+# Get unique document IDs
+document_ids = 
+  context
+  |> Enum.map(& &1.document_id)
+  |> Enum.uniq()
+
+# Fetch documents with metadata
+documents = 
+  MyApp.Repo.all(
+    from d in Arcana.Document,
+    where: d.id in ^document_ids,
+    select: %{id: d.id, file_path: d.file_path, metadata: d.metadata}
+  )
+
+IO.puts("\nReferences:")
+Enum.each(documents, fn doc ->
+  IO.puts("- #{doc.file_path || doc.metadata["title"]}")
+end)
+```
+
+## Error Handling
+
+```elixir
+case Arcana.Ask.ask(question, repo: MyApp.Repo, llm: llm) do
+  {:ok, answer, context} when context == [] ->
+    # No relevant context found
+    {:ok, "I couldn't find relevant information to answer that question."}
+    
+  {:ok, answer, context} ->
+    # Success
+    {:ok, answer}
+    
+  {:error, :no_llm_configured} ->
+    Logger.error("LLM not configured")
+    {:error, "Service unavailable"}
+    
+  {:error, {:search_failed, reason}} ->
+    Logger.error("Search failed: #{inspect(reason)}")
+    {:error, "Failed to retrieve context"}
+    
+  {:error, reason} ->
+    Logger.error("LLM failed: #{inspect(reason)}")
+    {:error, "Failed to generate answer"}
+end
+```
+
+## Telemetry Events
+
+Monitor RAG operations with telemetry:
+
+```elixir
+:telemetry.attach(
+  "ask-handler",
+  [:arcana, :ask, :stop],
+  fn _event, measurements, metadata, _config ->
+    IO.puts("Ask took #{measurements.duration}ns")
+    IO.puts("Question: #{metadata.question}")
+    IO.puts("Context chunks: #{metadata.context_count}")
+    if metadata[:answer] do
+      IO.puts("Answer length: #{String.length(metadata.answer)}")
+    end
+  end,
+  nil
+)
+```
+
+Events:
+- `[:arcana, :ask, :start]` - RAG operation started
+- `[:arcana, :ask, :stop]` - RAG operation completed
+- `[:arcana, :ask, :exception]` - RAG operation failed
+
+## Best Practices
+
+### Context Amount
+
+```elixir
+# Simple questions: fewer chunks
+Arcana.Ask.ask(
+  "What is X?",
+  repo: MyApp.Repo,
+  llm: llm,
+  limit: 3
+)
+
+# Complex questions: more context
+Arcana.Ask.ask(
+  "Compare X and Y, including pros and cons",
+  repo: MyApp.Repo,
+  llm: llm,
+  limit: 10
+)
+```
+
+### Quality Over Quantity
+
+```elixir
+# Use threshold to filter low-quality context
+Arcana.Ask.ask(
+  question,
+  repo: MyApp.Repo,
+  llm: llm,
+  threshold: 0.7,  # Only use relevant chunks
+  limit: 5
+)
+```
+
+### Cost Optimization
+
+```elixir
+# Use smaller, cheaper models for simple questions
+Arcana.Ask.ask(
+  "What is the API endpoint?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini"  # Cheaper
+)
+
+# Use powerful models for complex reasoning
+Arcana.Ask.ask(
+  "Analyze the trade-offs between these approaches",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o"  # More capable
+)
+```
+
+## Related Functions
+
+- [Arcana.ask/2](/api-reference/arcana) - Main module function
+- [Arcana.search/2](/api-reference/search) - Underlying search function
+- [Arcana.ingest/2](/api-reference/ingest) - Ingest content for RAG

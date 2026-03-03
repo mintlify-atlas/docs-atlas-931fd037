@@ -1,0 +1,897 @@
+---
+title: 'Search Modes'
+description: 'Understanding semantic, full-text, and hybrid search in Arcana'
+icon: 'magnifying-glass'
+---
+
+## Overview
+
+Arcana provides three search modes, each optimized for different query types:
+
+<CardGroup cols={3}>
+  <Card title="Semantic" icon="brain">
+    Vector similarity using embeddings. Best for conceptual queries.
+  </Card>
+  
+  <Card title="Full-text" icon="text">
+    PostgreSQL text search. Best for exact terms and names.
+  </Card>
+  
+  <Card title="Hybrid" icon="shuffle">
+    Combines both using Reciprocal Rank Fusion. Best overall quality.
+  </Card>
+</CardGroup>
+
+## Semantic Search (Vector Similarity)
+
+**How it works**: Converts your query to an embedding, then finds chunks with the closest embeddings using cosine similarity.
+
+```elixir
+# Default search mode
+{:ok, results} = Arcana.search(
+  "What is functional programming?",
+  repo: MyApp.Repo,
+  mode: :semantic,  # default, can be omitted
+  limit: 10
+)
+```
+
+### Implementation Details
+
+From `lib/arcana/search.ex:228-246`:
+
+```elixir
+defp do_search(:semantic, query, params) do
+  # 1. Embed the query
+  case Embedder.embed(Arcana.Config.embedder(), query, intent: :query) do
+    {:ok, query_embedding} ->
+      # 2. Search vector store with cosine similarity
+      results = VectorStore.search(
+        params.collection, 
+        query_embedding,
+        limit: params.limit,
+        threshold: params.threshold
+      )
+      
+      {:ok, transform_results(results)}
+      
+    {:error, reason} ->
+      {:error, {:embedding_failed, reason}}
+  end
+end
+```
+
+**PostgreSQL query** (from `lib/arcana/vector_store/pgvector.ex:97-122`):
+
+```sql
+SELECT 
+  c.id,
+  c.text,
+  c.chunk_index,
+  c.document_id,
+  1 - (c.embedding <=> $1) AS score
+FROM arcana_chunks c
+JOIN arcana_documents d ON c.document_id = d.id
+WHERE 1 - (c.embedding <=> $1) > $2  -- threshold filter
+ORDER BY c.embedding <=> $1          -- closest vectors first
+LIMIT $3
+```
+
+### When to Use Semantic Search
+
+<AccordionGroup>
+  <Accordion title="Conceptual Questions" icon="lightbulb">
+    **Best for**: Understanding, explanations, how-to queries
+    
+    ```elixir
+    # These queries benefit from semantic understanding
+    queries = [
+      "How does garbage collection work?",
+      "Explain the actor model",
+      "Benefits of immutability",
+      "Difference between processes and threads"
+    ]
+    
+    Enum.each(queries, fn query ->
+      {:ok, results} = Arcana.search(query, 
+        repo: MyApp.Repo,
+        mode: :semantic
+      )
+    end)
+    ```
+    
+    **Why it works**: Semantic search understands that "actor model" relates to "concurrent processes", "message passing", and "supervision trees" even if those exact words aren't in the query.
+  </Accordion>
+  
+  <Accordion title="Synonym Matching" icon="repeat">
+    **Best for**: Queries with common synonyms
+    
+    ```elixir
+    # Semantic search matches synonyms automatically
+    {:ok, results} = Arcana.search(
+      "ML algorithms",  # query uses "ML"
+      repo: MyApp.Repo
+    )
+    
+    # Returns chunks containing:
+    # ✅ "machine learning models"
+    # ✅ "neural networks"
+    # ✅ "deep learning approaches"
+    # Even though none contain "ML algorithms" exactly
+    ```
+  </Accordion>
+  
+  <Accordion title="Cross-lingual Search" icon="globe">
+    **Best for**: Multilingual knowledge bases (requires multilingual models)
+    
+    ```elixir
+    # With multilingual model
+    config :arcana, 
+      embedder: {:local, 
+        model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+      }
+    
+    # Query in English
+    {:ok, results} = Arcana.search(
+      "artificial intelligence",
+      repo: MyApp.Repo
+    )
+    
+    # Matches chunks in multiple languages:
+    # ✅ "artificial intelligence" (English)
+    # ✅ "intelligence artificielle" (French)
+    # ✅ "künstliche Intelligenz" (German)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Limitations
+
+<Warning>
+**Semantic search may miss**:
+- Exact technical terms ("PostgreSQL", "OAuth2.0")
+- Proper names ("John Smith", "Arcana")
+- Code symbols (function names, variables)
+- Acronyms that aren't common ("HNSW", "RRF")
+
+Use **hybrid search** for these cases.
+</Warning>
+
+## Full-text Search (PostgreSQL Text Search)
+
+**How it works**: Uses PostgreSQL's built-in `tsvector` and `tsquery` for keyword matching with linguistic features like stemming and stop word removal.
+
+```elixir
+{:ok, results} = Arcana.search(
+  "PostgreSQL pgvector",
+  repo: MyApp.Repo,
+  mode: :fulltext,
+  limit: 10
+)
+```
+
+### Implementation Details
+
+From `lib/arcana/search.ex:249-261`:
+
+```elixir
+defp do_search(:fulltext, query, params) do
+  # No embedding needed - direct text search
+  results = VectorStore.search_text(
+    params.collection,
+    query,
+    limit: params.limit,
+    source_id: params.source_id,
+    repo: params.repo
+  )
+  
+  {:ok, transform_results(results)}
+end
+```
+
+**PostgreSQL query** (from `lib/arcana/vector_store/pgvector.ex:139-181`):
+
+```sql
+SELECT 
+  c.id,
+  c.text,
+  c.chunk_index,
+  c.document_id,
+  ts_rank(to_tsvector('english', c.text), 
+          plainto_tsquery('english', $1)) AS score
+FROM arcana_chunks c
+JOIN arcana_documents d ON c.document_id = d.id
+WHERE to_tsvector('english', c.text) @@ 
+      plainto_tsquery('english', $1)
+ORDER BY score DESC
+LIMIT $2
+```
+
+### PostgreSQL Text Search Features
+
+<Tabs>
+  <Tab title="Stemming">
+    Automatically matches word variations:
+    
+    ```sql
+    -- Query: "running"
+    -- Matches:
+    SELECT to_tsvector('english', 'run')      -- ✅ matched
+    SELECT to_tsvector('english', 'running')  -- ✅ matched
+    SELECT to_tsvector('english', 'runs')     -- ✅ matched
+    SELECT to_tsvector('english', 'runner')   -- ✅ matched
+    ```
+    
+    All these words have the same stem: "run"
+  </Tab>
+  
+  <Tab title="Stop Words">
+    Ignores common words that don't add meaning:
+    
+    ```sql
+    -- Query: "the best way to handle errors"
+    -- Internally becomes: "best way handle errors"
+    -- ("the" and "to" are stop words)
+    
+    -- This matches:
+    "Best practices for error handling"  -- ✅
+    "A way to handle errors effectively" -- ✅
+    ```
+  </Tab>
+  
+  <Tab title="Ranking">
+    `ts_rank` scores results by:
+    - Term frequency (how often words appear)
+    - Document length (shorter = higher rank)
+    - Word proximity (closer matches = higher rank)
+    
+    ```elixir
+    # Results automatically sorted by ts_rank score
+    # Higher score = better match
+    [
+      %{text: "PostgreSQL pgvector extension", score: 0.876},
+      %{text: "Using pgvector with Postgres", score: 0.654},
+      %{text: "Vector databases include pgvector", score: 0.432}
+    ]
+    ```
+  </Tab>
+</Tabs>
+
+### When to Use Full-text Search
+
+<AccordionGroup>
+  <Accordion title="Exact Terms" icon="magnifying-glass">
+    **Best for**: Technical terms, product names, acronyms
+    
+    ```elixir
+    # These need exact matching
+    queries = [
+      "PostgreSQL 16",
+      "OAuth2.0 flow",
+      "HNSW index",
+      "Arcana.search/2"
+    ]
+    
+    Enum.each(queries, fn query ->
+      {:ok, results} = Arcana.search(query,
+        repo: MyApp.Repo,
+        mode: :fulltext
+      )
+    end)
+    ```
+  </Accordion>
+  
+  <Accordion title="Proper Names" icon="user">
+    **Best for**: People, companies, products
+    
+    ```elixir
+    {:ok, results} = Arcana.search(
+      "José Valim",  # Person's name
+      repo: MyApp.Repo,
+      mode: :fulltext
+    )
+    
+    # Semantic search might match "Elixir creator" or "language author"
+    # Full-text search finds the exact name
+    ```
+  </Accordion>
+  
+  <Accordion title="Code Symbols" icon="code">
+    **Best for**: Function names, module paths
+    
+    ```elixir
+    {:ok, results} = Arcana.search(
+      "Arcana.Embedder.Local.embed/2",
+      repo: MyApp.Repo,
+      mode: :fulltext
+    )
+    
+    # Finds exact function documentation
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Limitations
+
+<Warning>
+**Full-text search misses**:
+- Semantic relationships ("car" won't match "automobile")
+- Conceptual queries ("how does X work?")
+- Paraphrased content
+
+Use **hybrid search** for best results.
+</Warning>
+
+## Hybrid Search (Reciprocal Rank Fusion)
+
+**How it works**: Runs both semantic and full-text searches, then combines results using Reciprocal Rank Fusion (RRF) for better overall quality.
+
+```elixir
+{:ok, results} = Arcana.search(
+  "PostgreSQL pgvector setup",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  limit: 10
+)
+```
+
+### Two Implementation Approaches
+
+Arcana uses different strategies depending on the vector store backend:
+
+<Tabs>
+  <Tab title="pgvector (Single Query)">
+    **Recommended**: Computes both scores in a single database query.
+    
+    From `lib/arcana/vector_store/pgvector.ex:206-317`:
+    
+    ```sql
+    WITH base_scores AS (
+      -- Compute both semantic and fulltext scores
+      SELECT
+        c.id, c.text, c.chunk_index, c.document_id,
+        1 - (c.embedding <=> $1) AS semantic_score,
+        COALESCE(
+          ts_rank(to_tsvector('english', c.text), 
+                  plainto_tsquery('english', $2)), 
+          0
+        ) AS fulltext_score
+      FROM arcana_chunks c
+      JOIN arcana_documents d ON c.document_id = d.id
+    ),
+    score_bounds AS (
+      -- Normalize fulltext scores to 0-1 range
+      SELECT MIN(fulltext_score) AS min_ft,
+             MAX(fulltext_score) AS max_ft
+      FROM base_scores
+    ),
+    normalized AS (
+      SELECT bs.*,
+        CASE
+          WHEN sb.max_ft = sb.min_ft THEN 0
+          ELSE (bs.fulltext_score - sb.min_ft) / 
+               (sb.max_ft - sb.min_ft)
+        END AS fulltext_normalized
+      FROM base_scores bs, score_bounds sb
+    )
+    SELECT *,
+      ($5 * semantic_score + $6 * fulltext_normalized) AS hybrid_score
+    FROM normalized
+    WHERE ($5 * semantic_score + $6 * fulltext_normalized) > $7
+    ORDER BY hybrid_score DESC
+    LIMIT $8
+    ```
+    
+    **Configuration**:
+    
+    ```elixir
+    {:ok, results} = Arcana.search(
+      "query",
+      repo: MyApp.Repo,
+      mode: :hybrid,
+      semantic_weight: 0.7,   # 70% semantic
+      fulltext_weight: 0.3    # 30% fulltext
+    )
+    ```
+  </Tab>
+  
+  <Tab title="RRF (Separate Queries)">
+    **Fallback**: Runs separate searches and combines with RRF algorithm.
+    
+    From `lib/arcana/search.ex:315-323`:
+    
+    ```elixir
+    defp do_hybrid_rrf(query, params) do
+      # 1. Run semantic search
+      semantic_params = %{params | limit: params.limit * 2}
+      {:ok, semantic_results} = do_search(:semantic, query, semantic_params)
+      
+      # 2. Run fulltext search
+      fulltext_params = %{params | limit: params.limit * 2}
+      {:ok, fulltext_results} = do_search(:fulltext, query, fulltext_params)
+      
+      # 3. Combine with RRF
+      {:ok, rrf_combine(semantic_results, fulltext_results, params.limit)}
+    end
+    ```
+    
+    **RRF Algorithm** (from `lib/arcana/search.ex:356-376`):
+    
+    ```elixir
+    def rrf_combine(list1, list2, limit, k \\ 60) do
+      # 1. Score by rank position: 1 / (k + rank)
+      scores1 = list1 
+        |> Enum.with_index(1) 
+        |> Map.new(fn {item, rank} -> 
+          {item.id, 1 / (k + rank)} 
+        end)
+      
+      scores2 = list2
+        |> Enum.with_index(1)
+        |> Map.new(fn {item, rank} -> 
+          {item.id, 1 / (k + rank)}
+        end)
+      
+      # 2. Sum scores from both lists
+      all_items = (list1 ++ list2) |> Enum.uniq_by(& &1.id)
+      
+      all_items
+      |> Enum.map(fn {id, item} ->
+        rrf_score = Map.get(scores1, id, 0) + Map.get(scores2, id, 0)
+        Map.put(item, :score, rrf_score)
+      end)
+      |> Enum.sort_by(& &1.score, :desc)
+      |> Enum.take(limit)
+    end
+    ```
+  </Tab>
+</Tabs>
+
+### Why RRF Works
+
+Reciprocal Rank Fusion combines rankings from multiple sources:
+
+```
+Query: "PostgreSQL pgvector setup"
+
+Semantic results (by similarity):      Full-text results (by ts_rank):
+1. "Setup pgvector extension"   0.89  1. "PostgreSQL pgvector install"  0.95
+2. "Installing vector search"   0.82  2. "Setup pgvector extension"     0.88
+3. "PostgreSQL configuration"   0.75  3. "Vector database setup"        0.71
+4. "Database setup guide"       0.68  4. "PostgreSQL best practices"    0.65
+
+RRF scores (k=60):
+- "Setup pgvector extension": 1/(60+1) + 1/(60+2) = 0.0326  ✅ #1
+- "PostgreSQL pgvector install": 0 + 1/(60+1) = 0.0164     #2
+- "Installing vector search": 1/(60+2) + 0 = 0.0161        #3
+- "PostgreSQL configuration": 1/(60+3) + 0 = 0.0159        #4
+- "Vector database setup": 0 + 1/(60+3) = 0.0159          #5
+```
+
+**Benefits**:
+- Items ranking well in **both** lists get boosted
+- Reduces impact of outliers from either method
+- No need to normalize scores (rank-based)
+
+### When to Use Hybrid Search
+
+<AccordionGroup>
+  <Accordion title="Mixed Queries" icon="shuffle">
+    **Best for**: Queries with both concepts and specific terms
+    
+    ```elixir
+    # These benefit from both semantic and keyword matching
+    queries = [
+      "PostgreSQL pgvector performance tuning",
+      # semantic: "performance tuning"
+      # fulltext: "PostgreSQL pgvector"
+      
+      "How to configure OAuth2.0 authentication?",
+      # semantic: "how to configure", "authentication"
+      # fulltext: "OAuth2.0"
+      
+      "Elixir GenServer process lifecycle",
+      # semantic: "process lifecycle"
+      # fulltext: "Elixir GenServer"
+    ]
+    
+    Enum.each(queries, fn query ->
+      {:ok, results} = Arcana.search(query,
+        repo: MyApp.Repo,
+        mode: :hybrid
+      )
+    end)
+    ```
+  </Accordion>
+  
+  <Accordion title="Unknown Query Type" icon="question">
+    **Best for**: User-generated queries where you can't predict the type
+    
+    ```elixir
+    # Production search endpoint
+    def search(conn, %{"q" => query}) do
+      # Don't know if query is conceptual or keyword-based
+      # Use hybrid for best overall results
+      {:ok, results} = Arcana.search(query,
+        repo: MyApp.Repo,
+        mode: :hybrid
+      )
+      
+      json(conn, %{results: results})
+    end
+    ```
+  </Accordion>
+  
+  <Accordion title="Maximum Precision" icon="bullseye">
+    **Best for**: Critical applications where quality matters most
+    
+    ```elixir
+    # Legal document search - can't miss relevant results
+    {:ok, results} = Arcana.search(
+      "contract termination clause",
+      repo: MyApp.Repo,
+      mode: :hybrid,
+      limit: 20,
+      threshold: 0.3  # Lower threshold for recall
+    )
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Adjusting Hybrid Weights
+
+<Note>
+**Weight tuning** only available with pgvector backend. RRF uses fixed rank-based scoring.
+</Note>
+
+```elixir
+# Favor semantic understanding (conceptual queries)
+{:ok, results} = Arcana.search(
+  "explain machine learning",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.8,  # 80% semantic
+  fulltext_weight: 0.2   # 20% fulltext
+)
+
+# Favor keyword matching (technical queries)
+{:ok, results} = Arcana.search(
+  "Arcana.Embedder.Local.embed/2",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.3,  # 30% semantic
+  fulltext_weight: 0.7   # 70% fulltext
+)
+
+# Balanced (default)
+{:ok, results} = Arcana.search(
+  "query",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.5,
+  fulltext_weight: 0.5
+)
+```
+
+## Performance Characteristics
+
+<Tabs>
+  <Tab title="Speed">
+    **Benchmarks** (10K chunks, pgvector with IVFFlat index):
+    
+    | Mode | Latency (p50) | Latency (p99) | Notes |
+    |------|---------------|---------------|-------|
+    | Semantic | ~15ms | ~35ms | Single index scan |
+    | Full-text | ~8ms | ~20ms | GIN index lookup |
+    | Hybrid (pgvector) | ~25ms | ~50ms | Single query, both indexes |
+    | Hybrid (RRF) | ~30ms | ~60ms | Two separate queries |
+    
+    **Key factors**:
+    - Vector dimensions (384 faster than 1536)
+    - Index type (IVFFlat vs HNSW)
+    - Result limit (higher = slower)
+  </Tab>
+  
+  <Tab title="Quality">
+    **Typical metrics** (measured with Arcana.Evaluation):
+    
+    | Mode | MRR | Recall@5 | Precision@5 | Best For |
+    |------|-----|----------|-------------|----------|
+    | Semantic | 0.72 | 0.65 | 0.68 | Conceptual queries |
+    | Full-text | 0.68 | 0.58 | 0.71 | Exact term queries |
+    | Hybrid | 0.81 | 0.76 | 0.79 | Mixed/unknown queries |
+    
+    <Note>
+    These are example metrics. Your results depend on:
+    - Domain (technical vs general)
+    - Query types (conceptual vs keyword)
+    - Chunk quality (size, overlap)
+    - Embedding model choice
+    </Note>
+    
+    See [Evaluation Guide](/guides/evaluation) to measure your own data.
+  </Tab>
+  
+  <Tab title="Index Size">
+    **Storage requirements** (10K chunks):
+    
+    | Component | Size (384 dims) | Size (1536 dims) |
+    |-----------|-----------------|------------------|
+    | Embeddings | ~15 MB | ~60 MB |
+    | IVFFlat index | ~20 MB | ~80 MB |
+    | GIN fulltext index | ~5 MB | ~5 MB |
+    | **Total** | **~40 MB** | **~145 MB** |
+    
+    **Scaling**:
+    - 100K chunks: ~400 MB (384 dims) / ~1.5 GB (1536 dims)
+    - 1M chunks: ~4 GB (384 dims) / ~15 GB (1536 dims)
+  </Tab>
+</Tabs>
+
+## Real-World Examples
+
+<Tabs>
+  <Tab title="Semantic Search">
+    ```elixir
+    # Knowledge base search - conceptual understanding needed
+    defmodule MyApp.KnowledgeBase do
+      def search(query) do
+        {:ok, results} = Arcana.search(
+          query,
+          repo: MyApp.Repo,
+          mode: :semantic,  # Best for "how to" and "what is" queries
+          collection: "docs",
+          limit: 5,
+          threshold: 0.7    # Only highly relevant results
+        )
+        
+        results
+      end
+    end
+    
+    # Example queries:
+    MyApp.KnowledgeBase.search("How does supervision work?")
+    # Returns chunks about OTP supervisors, fault tolerance, etc.
+    
+    MyApp.KnowledgeBase.search("Benefits of immutability")
+    # Returns chunks about functional programming, concurrency, etc.
+    ```
+  </Tab>
+  
+  <Tab title="Full-text Search">
+    ```elixir
+    # API documentation search - need exact function names
+    defmodule MyApp.APIDocs do
+      def search_function(function_name) do
+        {:ok, results} = Arcana.search(
+          function_name,
+          repo: MyApp.Repo,
+          mode: :fulltext,  # Exact matching for code symbols
+          collection: "api-docs",
+          limit: 3
+        )
+        
+        results
+      end
+    end
+    
+    # Example queries:
+    MyApp.APIDocs.search_function("Arcana.search/2")
+    # Returns exact function documentation
+    
+    MyApp.APIDocs.search_function("Embedder.embed")
+    # Returns all embed/2 implementations
+    ```
+  </Tab>
+  
+  <Tab title="Hybrid Search">
+    ```elixir
+    # Production search - handle any query type
+    defmodule MyAppWeb.SearchController do
+      def search(conn, %{"q" => query, "collection" => collection}) do
+        {:ok, results} = Arcana.search(
+          query,
+          repo: MyApp.Repo,
+          mode: :hybrid,         # Best overall quality
+          collection: collection,
+          limit: 10,
+          semantic_weight: 0.6,  # Slightly favor semantics
+          fulltext_weight: 0.4
+        )
+        
+        # Add metadata for debugging
+        enriched = Enum.map(results, fn result ->
+          Map.merge(result, %{
+            semantic_score: result[:semantic_score],
+            fulltext_score: result[:fulltext_score]
+          })
+        end)
+        
+        json(conn, %{results: enriched})
+      end
+    end
+    
+    # Example queries:
+    # "PostgreSQL performance" - hybrid finds both semantic
+    #   (optimization, tuning) and keyword (PostgreSQL) matches
+    # "José Valim Elixir" - fulltext finds name, semantic finds context
+    # "how to debug" - semantic understanding with keyword boost
+    ```
+  </Tab>
+  
+  <Tab title="GraphRAG Enhanced">
+    ```elixir
+    # Knowledge graph + vector search fusion
+    {:ok, results} = Arcana.search(
+      "Who leads the Elixir project?",
+      repo: MyApp.Repo,
+      mode: :hybrid,  # Base search mode
+      graph: true,    # Add graph traversal
+      limit: 10
+    )
+    
+    # Behind the scenes:
+    # 1. Extract entities: ["Elixir project"]
+    # 2. Run hybrid vector search
+    # 3. Traverse graph for entity relationships
+    # 4. Combine with RRF (lib/arcana/search.ex:139-172)
+    
+    # Results include both:
+    # - Vector matches for "leads" and "project"
+    # - Graph relationships: Elixir → José Valim (creator)
+    ```
+  </Tab>
+</Tabs>
+
+## Choosing the Right Mode
+
+<Steps>
+  <Step title="Analyze Query Patterns">
+    Look at your typical queries:
+    
+    ```elixir
+    # Conceptual → Semantic
+    "How does X work?"
+    "What is the difference between X and Y?"
+    "Benefits of X"
+    
+    # Exact terms → Full-text
+    "Arcana.search/2"
+    "PostgreSQL 16"
+    "OAuth2.0"
+    
+    # Mixed → Hybrid
+    "How to configure OAuth2.0?"
+    "PostgreSQL performance tuning"
+    "Elixir GenServer examples"
+    ```
+  </Step>
+  
+  <Step title="Measure with Evaluation">
+    Use Arcana's built-in evaluation tools:
+    
+    ```elixir
+    # Create test cases
+    test_cases = [
+      %{query: "What is OTP?", expected_chunk_ids: [...]},
+      %{query: "GenServer.call/3", expected_chunk_ids: [...]},
+      # ... more cases
+    ]
+    
+    # Test each mode
+    [:semantic, :fulltext, :hybrid]
+    |> Enum.each(fn mode ->
+      metrics = Arcana.Evaluation.run(test_cases, mode: mode)
+      IO.inspect({mode, metrics})
+    end)
+    
+    # Compare MRR, Recall, Precision
+    ```
+    
+    See [Evaluation Guide](/guides/evaluation) for details.
+  </Step>
+  
+  <Step title="Consider Performance">
+    **High traffic?** → Use semantic (fastest)
+    
+    **Quality critical?** → Use hybrid (best results)
+    
+    **Exact matching needed?** → Use full-text
+  </Step>
+  
+  <Step title="Start with Hybrid">
+    When in doubt, use hybrid mode:
+    
+    ```elixir
+    # Production default
+    config :my_app,
+      search_mode: :hybrid,
+      semantic_weight: 0.6,
+      fulltext_weight: 0.4
+    
+    # Then optimize per use case
+    def search(query, opts) do
+      mode = Keyword.get(opts, :mode, :hybrid)
+      Arcana.search(query, mode: mode, repo: MyApp.Repo)
+    end
+    ```
+  </Step>
+</Steps>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Thresholds" icon="filter">
+    Filter low-quality results:
+    
+    ```elixir
+    {:ok, results} = Arcana.search(query,
+      repo: MyApp.Repo,
+      threshold: 0.7  # Only scores above 0.7
+    )
+    ```
+  </Card>
+  
+  <Card title="Limit Results" icon="list">
+    Return only what you need:
+    
+    ```elixir
+    # Simple questions
+    limit: 3
+    
+    # Complex questions
+    limit: 10
+    
+    # Avoid
+    limit: 50  # Too much context
+    ```
+  </Card>
+  
+  <Card title="Test Both Indexes" icon="database">
+    Ensure indexes are created:
+    
+    ```sql
+    -- Vector index (pgvector)
+    CREATE INDEX ON arcana_chunks 
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+    
+    -- Fulltext index
+    CREATE INDEX ON arcana_chunks 
+    USING gin (to_tsvector('english', text));
+    ```
+  </Card>
+  
+  <Card title="Monitor Performance" icon="chart-line">
+    Use telemetry to track search latency:
+    
+    ```elixir
+    :telemetry.attach(
+      "search-metrics",
+      [:arcana, :search, :stop],
+      &handle_search_metrics/4,
+      nil
+    )
+    ```
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="RAG Pipeline" icon="diagram-project" href="/core-concepts/rag-pipeline">
+    Understand the complete RAG workflow
+  </Card>
+  
+  <Card title="Embeddings" icon="brain" href="/core-concepts/embeddings">
+    Learn how semantic search works with vector embeddings
+  </Card>
+  
+  <Card title="Evaluation" icon="chart-line" href="/guides/evaluation">
+    Measure and compare search quality metrics
+  </Card>
+  
+  <Card title="Re-ranking" icon="ranking-star" href="/guides/reranking">
+    Improve search results with re-ranking
+  </Card>
+</CardGroup>

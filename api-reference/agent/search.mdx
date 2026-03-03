@@ -1,0 +1,320 @@
+---
+title: Agent.search/2
+description: Execute search and populate results in the context
+---
+
+## Function Signature
+
+```elixir
+search(ctx, opts \\ [])
+```
+
+Executes search and populates results in the context.
+
+## Purpose
+
+Uses `sub_questions` if present (from decompose step), otherwise uses the original question. Searches the selected collections and populates results.
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()">
+  Options for the search step
+</ParamField>
+
+### Options
+
+<ParamField path="searcher" type="module | function">
+  Custom searcher module or function (default: `Arcana.Agent.Searcher.Arcana`)
+  
+  - **Module**: Must implement `search/3` callback
+  - **Function**: Signature `fn question, collection, opts -> {:ok, chunks} | {:error, reason} end`
+</ParamField>
+
+<ParamField path="collection" type="String.t()">
+  Single collection name to search
+  
+  Takes precedence over `:collections` and `ctx.collections`.
+</ParamField>
+
+<ParamField path="collections" type="list(String.t())">
+  List of collection names to search
+  
+  Takes precedence over `ctx.collections`.
+</ParamField>
+
+<ParamField path="self_correct" type="boolean">
+  Enable self-correcting search (default: false)
+  
+  **Note**: This option is parsed but not currently implemented in the search step. Use `reason/2` for multi-hop reasoning instead.
+</ParamField>
+
+<ParamField path="max_iterations" type="integer">
+  Max retry attempts for self-correct (default: 3)
+  
+  **Note**: Currently unused. See `reason/2` for iterative search.
+</ParamField>
+
+<ParamField path="sufficient_prompt" type="function">
+  Custom prompt function `fn question, chunks -> prompt_string end`
+  
+  **Note**: Currently unused. See `reason/2` for sufficiency evaluation.
+</ParamField>
+
+<ParamField path="rewrite_prompt" type="function">
+  Custom prompt function for query rewriting
+  
+  **Note**: Currently unused. See `reason/2` for iterative search.
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="results" type="list(map)">
+  Search results. Each result contains:
+  - `question` - The query that was searched
+  - `collection` - The collection that was searched
+  - `chunks` - List of retrieved chunks with `id`, `text`, and `score`
+</ResponseField>
+
+## Collection Selection Priority
+
+Collections are determined in this order:
+
+1. `:collection` option (single collection)
+2. `:collections` option (multiple collections)
+3. `ctx.collections` (set by `select/2`)
+4. Fallback: `["default"]`
+
+## Examples
+
+### Basic Search
+
+```elixir
+ctx
+|> Arcana.Agent.search()  # Uses "default" collection
+|> Arcana.Agent.answer()
+
+ctx.results
+# => [
+#   %{
+#     question: "What is Elixir?",
+#     collection: "default",
+#     chunks: [
+#       %{id: 1, text: "Elixir is a functional...", score: 0.89},
+#       %{id: 5, text: "Elixir runs on the BEAM...", score: 0.85}
+#     ]
+#   }
+# ]
+```
+
+### Search Specific Collection
+
+```elixir
+ctx
+|> Arcana.Agent.search(collection: "technical_docs")
+|> Arcana.Agent.answer()
+```
+
+### Search Multiple Collections
+
+```elixir
+ctx
+|> Arcana.Agent.search(collections: ["docs", "faq"])
+|> Arcana.Agent.answer()
+
+ctx.results
+# => [
+#   %{question: "What is Elixir?", collection: "docs", chunks: [...]},
+#   %{question: "What is Elixir?", collection: "faq", chunks: [...]}
+# ]
+```
+
+### With LLM-Based Collection Selection
+
+```elixir
+ctx
+|> Arcana.Agent.select(collections: ["docs", "api", "guides"])
+|> Arcana.Agent.search()  # Uses collections from select step
+|> Arcana.Agent.answer()
+```
+
+### With Decomposition
+
+```elixir
+ctx = Arcana.Agent.new("How do GenServer and Agent differ?")
+|> Arcana.Agent.decompose()
+|> Arcana.Agent.search()
+
+ctx.sub_questions
+# => ["What is GenServer?", "What is Agent?", "Differences"]
+
+ctx.results
+# => [
+#   %{question: "What is GenServer?", collection: "default", chunks: [...]},
+#   %{question: "What is Agent?", collection: "default", chunks: [...]},
+#   %{question: "Differences", collection: "default", chunks: [...]}
+# ]
+```
+
+### With Query Expansion
+
+```elixir
+ctx
+|> Arcana.Agent.expand()   # Adds related terms
+|> Arcana.Agent.search()   # Searches with expanded query
+```
+
+### Complete Pipeline
+
+```elixir
+ctx
+|> Arcana.Agent.rewrite()                       # Clean input
+|> Arcana.Agent.select(collections: ["docs", "api"])
+|> Arcana.Agent.expand()                        # Add synonyms
+|> Arcana.Agent.decompose()                     # Split into sub-questions
+|> Arcana.Agent.search()                        # Search all combinations
+|> Arcana.Agent.answer()
+
+# If decompose creates 2 sub-questions and select chooses 2 collections:
+# Total searches = 2 sub-questions × 2 collections = 4 searches
+```
+
+## Custom Searcher Module
+
+```elixir
+defmodule MyApp.ElasticsearchSearcher do
+  @behaviour Arcana.Agent.Searcher
+
+  @impl true
+  def search(question, collection, opts) do
+    case Elasticsearch.search(collection, question, opts) do
+      {:ok, results} ->
+        chunks =
+          Enum.map(results, fn hit ->
+            %{id: hit.id, text: hit.source.content, score: hit.score}
+          end)
+
+        {:ok, chunks}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+end
+
+# Usage
+ctx
+|> Arcana.Agent.search(searcher: MyApp.ElasticsearchSearcher)
+```
+
+### Inline Searcher Function
+
+```elixir
+ctx
+|> Arcana.Agent.search(
+  searcher: fn question, collection, opts ->
+    # Custom search logic
+    {:ok, my_search_function(question, collection, opts)}
+  end
+)
+```
+
+### Hybrid Search
+
+```elixir
+defmodule MyApp.HybridSearcher do
+  @behaviour Arcana.Agent.Searcher
+
+  @impl true
+  def search(question, collection, opts) do
+    # Combine vector and keyword search
+    with {:ok, vector_results} <- vector_search(question, collection, opts),
+         {:ok, keyword_results} <- keyword_search(question, collection, opts) do
+      merged = merge_and_deduplicate(vector_results, keyword_results)
+      {:ok, merged}
+    end
+  end
+end
+```
+
+## Skip Retrieval
+
+If `gate/2` sets `skip_retrieval: true`, search returns empty results:
+
+```elixir
+ctx
+|> Arcana.Agent.gate()     # Sets skip_retrieval: true for "2+2"
+|> Arcana.Agent.search()   # Returns empty results
+|> Arcana.Agent.answer()   # Answers without context
+
+ctx.results
+# => []
+```
+
+## Custom Searcher Behaviour
+
+```elixir
+defmodule Arcana.Agent.Searcher do
+  @callback search(
+              question :: String.t(),
+              collection :: String.t(),
+              opts :: Keyword.t()
+            ) ::
+              {:ok, [chunk :: map()]} | {:error, term()}
+end
+```
+
+Chunks should have at minimum:
+- `id` - Unique identifier
+- `text` - The chunk content
+- `score` - Relevance score (optional)
+
+## Search Options Passed to Searcher
+
+The searcher receives these options from context:
+
+```elixir
+[
+  repo: ctx.repo,
+  limit: ctx.limit,      # Default: 5
+  threshold: ctx.threshold  # Default: 0.5
+]
+```
+
+## Telemetry Event
+
+Emits `[:arcana, :agent, :search]` with metadata:
+
+```elixir
+# Start metadata
+%{
+  question: ctx.question,
+  sub_questions: ctx.sub_questions,
+  collections: ["docs", "api"],
+  searcher: Arcana.Agent.Searcher.Arcana
+}
+
+# Stop metadata
+%{
+  result_count: 4,        # Number of search operations
+  total_chunks: 20        # Total chunks retrieved
+}
+```
+
+## Performance Considerations
+
+- Total searches = `sub_questions × collections`
+- With 3 sub-questions and 2 collections = 6 searches
+- Consider limiting sub-questions and collections
+- Use `reason/2` for iterative search instead of upfront decomposition
+
+## See Also
+
+- [decompose/2](/api-reference/agent/decompose) - Creates sub-questions
+- [select/2](/api-reference/agent/select) - Chooses collections
+- [reason/2](/api-reference/agent/reason) - Multi-hop iterative search
+- [rerank/2](/api-reference/agent/rerank) - Improve result quality
+- [answer/2](/api-reference/agent/answer) - Generate answer from results

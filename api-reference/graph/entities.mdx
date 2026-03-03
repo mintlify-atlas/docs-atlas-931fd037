@@ -1,0 +1,357 @@
+---
+title: Entity Extraction
+description: Identifying named entities from text using NER or LLMs
+---
+
+## Overview
+
+Entity extraction is the first step in building a knowledge graph. It identifies **named entities** (people, organizations, locations, concepts, etc.) from your document chunks.
+
+Arcana provides two built-in implementations:
+
+- **NER** (Named Entity Recognition) - Fast, local, using Bumblebee ML models
+- **LLM** - Flexible, accurate, using your configured language model
+
+## How Entity Extraction Works
+
+During graph building (typically during ingest), each chunk is processed:
+
+```elixir
+text = "Sam Altman is CEO of OpenAI."
+
+# 1. Extract entities
+{:ok, entities} = EntityExtractor.extract(extractor, text)
+
+# Result:
+[
+  %{name: "Sam Altman", type: "person", span_start: 0, span_end: 10, score: 0.99},
+  %{name: "OpenAI", type: "organization", span_start: 22, span_end: 28, score: 0.98}
+]
+
+# 2. Track mentions (which chunk contains which entity)
+mentions = [
+  %{entity_name: "Sam Altman", chunk_id: "chunk_123"},
+  %{entity_name: "OpenAI", chunk_id: "chunk_123"}
+]
+
+# 3. Deduplicate entities across chunks
+# "Sam Altman" from multiple chunks → single entity
+```
+
+See implementation in `lib/arcana/graph/graph_builder.ex:39`
+
+## Entity Extractors
+
+### NER Extractor (Default)
+
+Uses Bumblebee's `dslim/distilbert-NER` model for fast, local entity extraction.
+
+**Configuration:**
+```elixir
+config :arcana, :graph,
+  entity_extractor: :ner
+```
+
+**Entity Types:**
+- `person` - Individual people
+- `organization` - Companies, institutions
+- `location` - Geographic places
+- `concept` - Miscellaneous named entities
+- `other` - Fallback type
+
+**Example:**
+```elixir
+{:ok, entities} = Arcana.Graph.EntityExtractor.NER.extract(
+  "Sam Altman is CEO of OpenAI.",
+  []
+)
+
+# Returns:
+[
+  %{
+    name: "Sam Altman",
+    type: "person",
+    span_start: 0,
+    span_end: 10,
+    score: 0.99
+  },
+  %{
+    name: "OpenAI",
+    type: "organization",
+    span_start: 22,
+    span_end: 28,
+    score: 0.98
+  }
+]
+```
+
+See `lib/arcana/graph/entity_extractor/ner.ex:24`
+
+**Label Mapping:**
+The NER model outputs BIO tags which are mapped to types:
+
+```elixir
+EntityExtractor.NER.map_label("B-PER")  # => "person"
+EntityExtractor.NER.map_label("I-ORG")  # => "organization"
+EntityExtractor.NER.map_label("B-LOC")  # => "location"
+EntityExtractor.NER.map_label("MISC")   # => "concept"
+```
+
+See `lib/arcana/graph/entity_extractor/ner.ex:78`
+
+**Advantages:**
+- ⚡ Fast - No LLM calls required
+- 💰 Cost-effective - Runs locally
+- 🔒 Private - No external API calls
+- ⚙️ Reliable - Consistent output
+
+**Limitations:**
+- Limited to 4 entity types
+- May miss domain-specific entities
+- Less context-aware than LLMs
+
+### LLM Extractor
+
+Uses your configured LLM for flexible, context-aware entity extraction.
+
+**Configuration:**
+```elixir
+config :arcana, :graph,
+  entity_extractor: {Arcana.Graph.EntityExtractor.LLM, []}
+```
+
+**Entity Types (Extended):**
+- `person` - People, including titles ("Dr. Jane Smith", "CEO John Doe")
+- `organization` - Companies, institutions, governments, teams
+- `location` - Geographic places, addresses, facilities
+- `event` - Conferences, incidents, historical moments
+- `concept` - Abstract ideas, theories, methodologies
+- `technology` - Products, tools, software, hardware
+- `role` - Job titles, positions
+- `publication` - Papers, books, articles
+- `media` - Movies, songs, artworks
+- `award` - Awards, certifications, honors
+- `standard` - Specifications, protocols, regulations
+- `language` - Programming or natural languages
+- `other` - Entities that don't fit above categories
+
+**Example:**
+```elixir
+extractor = {Arcana.Graph.EntityExtractor.LLM, llm: &MyApp.llm/3}
+
+{:ok, entities} = Arcana.Graph.EntityExtractor.extract(
+  extractor,
+  "GPT-4 was trained on Azure infrastructure using PyTorch."
+)
+
+# Returns:
+[
+  %{name: "GPT-4", type: "technology", description: "Language model"},
+  %{name: "Azure", type: "technology", description: "Cloud platform"},
+  %{name: "PyTorch", type: "technology", description: "ML framework"}
+]
+```
+
+See `lib/arcana/graph/entity_extractor/llm.ex:50`
+
+**Advantages:**
+- 🎯 Accurate - Understands context
+- 🔧 Flexible - Supports 12+ entity types
+- 🎓 Domain-aware - Recognizes specialized terms
+- 📝 Descriptive - Can include entity descriptions
+
+**Limitations:**
+- 🐌 Slower - Requires LLM calls
+- 💸 Costly - LLM API fees
+- 🎲 Non-deterministic - Output may vary
+
+## Custom Extractors
+
+Implement the `Arcana.Graph.EntityExtractor` behaviour for custom extraction:
+
+```elixir
+defmodule MyApp.SpacyExtractor do
+  @behaviour Arcana.Graph.EntityExtractor
+
+  @impl true
+  def extract(text, opts) do
+    endpoint = Keyword.fetch!(opts, :endpoint)
+    
+    # Call external spaCy service
+    case HTTPoison.post(endpoint, Jason.encode!(%{text: text})) do
+      {:ok, %{body: body}} ->
+        entities = parse_spacy_response(body)
+        {:ok, entities}
+      
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def extract_batch(texts, opts) do
+    # Optional: batch optimization
+    results = Enum.map(texts, &extract(&1, opts))
+    if Enum.all?(results, &match?({:ok, _}, &1)) do
+      {:ok, Enum.map(results, fn {:ok, ents} -> ents end)}
+    else
+      {:error, :batch_failed}
+    end
+  end
+
+  defp parse_spacy_response(body) do
+    # Parse spaCy NER output
+    # Return list of entity maps
+  end
+end
+```
+
+**Configure:**
+```elixir
+config :arcana, :graph,
+  entity_extractor: {MyApp.SpacyExtractor, endpoint: "http://localhost:5000/ner"}
+```
+
+See behaviour definition in `lib/arcana/graph/entity_extractor.ex:71`
+
+## Entity Format
+
+All extractors must return entities as maps with:
+
+**Required Fields:**
+- `:name` (string) - The entity name
+- `:type` (string) - Entity type as string (e.g., "person", "organization")
+
+**Optional Fields:**
+- `:span_start` (integer) - Character offset where entity starts in text
+- `:span_end` (integer) - Character offset where entity ends
+- `:score` (float) - Confidence score (0.0-1.0)
+- `:description` (string) - Brief description of the entity
+
+See format specification in `lib/arcana/graph/entity_extractor.ex:55`
+
+## Real Examples from Source
+
+### Example 1: NER Extraction
+
+From `lib/arcana/graph/entity_extractor/ner.ex:40`:
+
+```elixir
+def extract("", _opts), do: {:ok, []}
+
+def extract(text, _opts) when is_binary(text) do
+  # Call Bumblebee NER model
+  %{entities: raw_entities} = NERServing.run(text)
+
+  entities =
+    raw_entities
+    |> Enum.map(&normalize_entity/1)
+    |> deduplicate_by_name()
+
+  {:ok, entities}
+end
+```
+
+### Example 2: LLM Prompt
+
+From `lib/arcana/graph/entity_extractor/llm.ex:91`:
+
+```elixir
+def build_prompt(text, types) do
+  type_list = Enum.map_join(types, ", ", &to_string/1)
+
+  """
+  Extract named entities from the following text.
+
+  ## Text to analyze:
+  #{text}
+
+  ## Entity types to extract:
+  #{type_list}
+
+  ## Instructions:
+  1. Identify all significant named entities in the text
+  2. Classify each entity into one of the types listed above
+  3. Use "other" for entities that don't fit the categories
+  4. Include a brief description if the text provides context
+
+  ## Output format:
+  Return a JSON array of entity objects. Each object should have:
+  - "name": The entity name (required)
+  - "type": One of the types listed above (required)
+  - "description": Brief description from context (optional)
+
+  Return only the JSON array, no other text.
+  """
+end
+```
+
+### Example 3: Batch Processing
+
+From `lib/arcana/graph/entity_extractor.ex:131`:
+
+```elixir
+def extract_batch({module, opts}, texts) when is_atom(module) do
+  if function_exported?(module, :extract_batch, 2) do
+    # Use native batch implementation if available
+    module.extract_batch(texts, opts)
+  else
+    # Fall back to sequential extraction
+    sequential_extract(module, opts, texts)
+  end
+end
+```
+
+## Configuration Options
+
+### Inline Function
+
+```elixir
+config :arcana, :graph,
+  entity_extractor: fn text, _opts ->
+    # Custom logic
+    {:ok, [%{name: "Test", type: "other"}]}
+  end
+```
+
+### Module with Options
+
+```elixir
+config :arcana, :graph,
+  entity_extractor: {MyApp.CustomExtractor, 
+    model: "gpt-4",
+    temperature: 0.0
+  }
+```
+
+### Per-Call Override
+
+```elixir
+Arcana.Graph.build(chunks,
+  entity_extractor: {MyApp.SpecialExtractor, mode: :strict}
+)
+```
+
+## Performance Considerations
+
+**NER Extractor:**
+- ~50-100ms per chunk (local inference)
+- Memory: ~500MB for model
+- Parallelizable: Yes (multiple servings)
+
+**LLM Extractor:**
+- ~500-2000ms per chunk (API latency)
+- Cost: ~$0.001-0.01 per chunk (varies by model)
+- Parallelizable: Yes (concurrent API calls)
+
+**Optimization Tips:**
+1. Use NER for initial extraction, LLM for refinement
+2. Implement `extract_batch/2` for batch API calls
+3. Cache entities by chunk hash
+4. Use concurrent processing (see `lib/arcana/graph.ex:361`)
+
+## Next Steps
+
+- [Relationships](/api-reference/graph/relationships) - Extract relationships between entities
+- [Communities](/api-reference/graph/communities) - Detect entity communities
+- [Search](/api-reference/graph/search) - Use entities for graph search

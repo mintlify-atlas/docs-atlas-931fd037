@@ -1,0 +1,260 @@
+---
+title: Agent.expand/2
+description: Expand the query with synonyms and related terms
+---
+
+## Function Signature
+
+```elixir
+expand(ctx, opts \\ [])
+```
+
+Expands the query with synonyms and related terms to improve retrieval recall.
+
+## Purpose
+
+Uses the LLM to add related terms and synonyms that may help find more relevant documents. The expanded query is used by `search/2` if present.
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()">
+  Options for the expand step
+</ParamField>
+
+### Options
+
+<ParamField path="expander" type="module | function">
+  Custom expander module or function (default: `Arcana.Agent.Expander.LLM`)
+  
+  - **Module**: Must implement `expand/2` callback
+  - **Function**: Signature `fn question, opts -> {:ok, expanded} | {:error, reason} end`
+</ParamField>
+
+<ParamField path="prompt" type="function">
+  Custom prompt function `fn question -> prompt_string end`
+  
+  Only used by the default LLM expander.
+</ParamField>
+
+<ParamField path="llm" type="function">
+  Override the LLM function for this step
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="expanded_query" type="string | nil">
+  The query with added synonyms and related terms. Set to `nil` if expansion fails.
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```elixir
+ctx = Arcana.Agent.new("GenServer")
+|> Arcana.Agent.expand()
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer()
+
+ctx.question
+# => "GenServer"
+
+ctx.expanded_query
+# => "GenServer process server state callback OTP behavior"
+```
+
+### With Rewrite Step
+
+```elixir
+ctx
+|> Arcana.Agent.rewrite()  # Clean input first
+|> Arcana.Agent.expand()   # Then add related terms
+|> Arcana.Agent.search()
+```
+
+### Custom Expander Module
+
+```elixir
+defmodule MyApp.ThesaurusExpander do
+  @behaviour Arcana.Agent.Expander
+
+  @synonyms %{
+    "elixir" => ["erlang", "beam", "functional programming"],
+    "process" => ["actor", "concurrent", "parallel"],
+    "genserver" => ["server", "otp", "behavior", "callback"]
+  }
+
+  @impl true
+  def expand(question, _opts) do
+    expanded =
+      @synonyms
+      |> Enum.reduce(question, fn {term, synonyms}, acc ->
+        if String.downcase(acc) =~ term do
+          acc <> " " <> Enum.join(synonyms, " ")
+        else
+          acc
+        end
+      end)
+
+    {:ok, expanded}
+  end
+end
+
+# Usage
+ctx
+|> Arcana.Agent.expand(expander: MyApp.ThesaurusExpander)
+```
+
+### Inline Expander Function
+
+```elixir
+ctx
+|> Arcana.Agent.expand(
+  expander: fn question, _opts ->
+    # Add generic programming terms
+    {:ok, question <> " programming development code"}
+  end
+)
+```
+
+### Domain-Specific Expansion
+
+```elixir
+defmodule MyApp.TechnicalExpander do
+  @behaviour Arcana.Agent.Expander
+
+  @impl true
+  def expand(question, _opts) do
+    technical_terms = extract_technical_terms(question)
+    related_terms = fetch_related_terms_from_ontology(technical_terms)
+    
+    expanded = question <> " " <> Enum.join(related_terms, " ")
+    {:ok, expanded}
+  end
+
+  defp extract_technical_terms(question) do
+    # Extract known technical terms
+  end
+
+  defp fetch_related_terms_from_ontology(terms) do
+    # Lookup in technical ontology/knowledge graph
+  end
+end
+```
+
+### API-Aware Expansion
+
+```elixir
+defmodule MyApp.APIExpander do
+  @behaviour Arcana.Agent.Expander
+
+  @impl true
+  def expand(question, _opts) do
+    # Call external expansion API
+    case ExternalAPI.expand_query(question) do
+      {:ok, %{"expanded" => expanded}} -> {:ok, expanded}
+      {:error, _} -> {:ok, question}  # Fallback to original
+    end
+  end
+end
+```
+
+## Query Transformation Chain
+
+Expansion builds on previous transformations:
+
+```elixir
+ctx
+|> Arcana.Agent.rewrite()  # "Hey, what's GenServer?" → "GenServer"
+|> Arcana.Agent.expand()   # "GenServer" → "GenServer process server state callback"
+|> Arcana.Agent.search()   # Uses expanded query
+```
+
+Priority: `expanded_query` → `rewritten_query` → `question`
+
+## Examples of Expansions
+
+| Original | Expanded |
+|----------|----------|
+| "GenServer" | "GenServer process server state callback OTP behavior" |
+| "supervision tree" | "supervision tree supervisor child strategy restart" |
+| "message passing" | "message passing send receive process communication" |
+| "ETS" | "ETS Erlang Term Storage table memory cache" |
+
+## Custom Expander Behaviour
+
+```elixir
+defmodule Arcana.Agent.Expander do
+  @callback expand(question :: String.t(), opts :: Keyword.t()) ::
+              {:ok, String.t()} | {:error, term()}
+end
+```
+
+Implement this behaviour for custom expanders:
+
+```elixir
+defmodule MyApp.CustomExpander do
+  @behaviour Arcana.Agent.Expander
+
+  @impl true
+  def expand(question, opts) do
+    # Your expansion logic
+    expanded = add_related_terms(question, opts)
+    {:ok, expanded}
+  end
+end
+```
+
+## Telemetry Event
+
+Emits `[:arcana, :agent, :expand]` with metadata:
+
+```elixir
+# Start metadata
+%{
+  question: ctx.question,  # Or rewritten_query if present
+  expander: Arcana.Agent.Expander.LLM
+}
+
+# Stop metadata
+%{expanded_query: "GenServer process server..."}
+```
+
+## When to Use
+
+Use `expand/2` when:
+
+- Users search with terse queries lacking context
+- Your documents use varied terminology for the same concepts
+- You want to improve recall at the cost of some precision
+- Embeddings alone miss semantic variations
+
+## Best Practices
+
+1. **Don't over-expand** - Too many terms dilute the query
+2. **Domain-specific expansion** - Use relevant synonyms for your domain
+3. **Combine with rewrite** - Clean input before expansion
+4. **Test impact** - Measure precision/recall changes
+5. **Consider cost** - LLM-based expansion adds latency and cost
+
+## Trade-offs
+
+**Benefits:**
+- Improved recall (find more relevant documents)
+- Handles terminology variations
+- Catches synonyms and related concepts
+
+**Costs:**
+- May reduce precision (more false positives)
+- Adds LLM call latency
+- Can over-expand simple queries
+
+## See Also
+
+- [rewrite/2](/api-reference/agent/rewrite) - Clean input before expansion
+- [decompose/2](/api-reference/agent/decompose) - Break into sub-questions
+- [search/2](/api-reference/agent/search) - Uses expanded query

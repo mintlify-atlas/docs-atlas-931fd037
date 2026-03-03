@@ -1,0 +1,340 @@
+---
+title: 'RAG Pipeline'
+description: 'How Arcana processes documents and generates answers using Retrieval Augmented Generation'
+icon: 'diagram-project'
+---
+
+## What is RAG?
+
+Retrieval Augmented Generation (RAG) is a technique that enhances Large Language Models (LLMs) by providing them with relevant context from your documents. Instead of relying solely on the model's training data, RAG retrieves specific information from your knowledge base before generating an answer.
+
+This approach:
+- Reduces hallucinations by grounding responses in real data
+- Enables answers based on private or recent information
+- Allows you to update knowledge without retraining models
+- Provides attribution through source documents
+
+## How Arcana's RAG Pipeline Works
+
+Arcana implements a complete RAG pipeline with six core steps:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Your Phoenix App                    │
+├─────────────────────────────────────────────────────────┤
+│                    Arcana.Agent                         │
+│  (rewrite → select → expand → search → rerank → answer) │
+├─────────────────────────────────────────────────────────┤
+│  Arcana.ask/2   │  Arcana.search/2  │  Arcana.ingest/2  │
+├─────────────────┴───────────────────┴───────────────────┤
+│                                                         │
+│  ┌─────────────┐  ┌─────────────────┐  ┌─────────────┐  │
+│  │   Chunker   │  │   Embeddings    │  │   Search    │  │
+│  │ (splitting) │  │   (Bumblebee)   │  │ (pgvector)  │  │
+│  └─────────────┘  └─────────────────┘  └─────────────┘  │
+│                                                         │
+├─────────────────────────────────────────────────────────┤
+│              Your Existing Ecto Repo                    │
+│         PostgreSQL + pgvector extension                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Pipeline Steps
+
+<Steps>
+  <Step title="Chunk">
+    Split documents into overlapping segments for better retrieval granularity.
+    
+    **Default configuration:**
+    - Size: 450 tokens
+    - Overlap: 50 tokens
+    - Format-aware (markdown, code)
+    
+    See [Chunking Strategies](/core-concepts/chunking) for details.
+  </Step>
+  
+  <Step title="Embed">
+    Convert text chunks into vector embeddings (numerical representations).
+    
+    **Supported providers:**
+    - Local Bumblebee models (default)
+    - OpenAI embeddings
+    - Custom providers
+    
+    See [Embeddings](/core-concepts/embeddings) for details.
+  </Step>
+  
+  <Step title="Store">
+    Save embeddings in a vector database for efficient similarity search.
+    
+    **Backends:**
+    - pgvector (production)
+    - HNSWLib (in-memory testing)
+    
+    Location: `lib/arcana/vector_store/pgvector.ex:28-79`
+  </Step>
+  
+  <Step title="Search">
+    Find relevant chunks by comparing query embeddings using cosine similarity.
+    
+    **Search modes:**
+    - Semantic (vector similarity)
+    - Full-text (PostgreSQL text search)
+    - Hybrid (combines both with RRF)
+    
+    See [Search Modes](/core-concepts/search-modes) for details.
+  </Step>
+  
+  <Step title="Augment">
+    Build a prompt with retrieved context chunks.
+    
+    **Default prompt structure:**
+    ```text
+    Answer the user's question based on the following context.
+    If the answer is not in the context, say you don't know.
+
+    Context:
+    [chunk 1]
+    ---
+    [chunk 2]
+    ```
+    
+    Location: `lib/arcana/ask.ex:99-118`
+  </Step>
+  
+  <Step title="Generate">
+    Send the augmented prompt to an LLM to generate the final answer.
+    
+    **Supported LLMs:**
+    - OpenAI (via Req.LLM)
+    - Anthropic (via Req.LLM)
+    - Custom implementations
+    
+    Location: `lib/arcana/ask.ex:80-97`
+  </Step>
+</Steps>
+
+## Basic RAG Example
+
+Here's how the complete pipeline works in practice:
+
+<Tabs>
+  <Tab title="Ingestion">
+    ```elixir
+    # Step 1-3: Chunk → Embed → Store
+    {:ok, document} = Arcana.ingest(
+      """
+      Elixir is a dynamic, functional language designed for building 
+      scalable and maintainable applications. It runs on the BEAM VM.
+      """,
+      repo: MyApp.Repo,
+      collection: "elixir-docs"
+    )
+
+    # Behind the scenes:
+    # 1. Text split into chunks (lib/arcana/chunker/default.ex:56-68)
+    # 2. Each chunk embedded (lib/arcana/ingest.ex:125-156)
+    # 3. Stored in pgvector (lib/arcana/ingest.ex:133-145)
+    ```
+  </Tab>
+  
+  <Tab title="Search">
+    ```elixir
+    # Step 4: Search for relevant chunks
+    {:ok, results} = Arcana.search(
+      "What is Elixir?",
+      repo: MyApp.Repo,
+      collection: "elixir-docs",
+      limit: 5
+    )
+
+    # Returns:
+    # [
+    #   %{
+    #     id: "...",
+    #     text: "Elixir is a dynamic, functional language...",
+    #     score: 0.89,
+    #     document_id: "...",
+    #     chunk_index: 0
+    #   }
+    # ]
+    ```
+  </Tab>
+  
+  <Tab title="Ask">
+    ```elixir
+    # Step 4-6: Search → Augment → Generate
+    {:ok, answer, context} = Arcana.ask(
+      "What is Elixir?",
+      repo: MyApp.Repo,
+      llm: "openai:gpt-4o-mini",
+      collection: "elixir-docs"
+    )
+
+    # Behind the scenes:
+    # 1. Query embedded and searched (lib/arcana/search.ex:228-246)
+    # 2. Context chunks retrieved
+    # 3. Prompt built with context (lib/arcana/ask.ex:99-118)
+    # 4. LLM generates answer (lib/arcana/ask.ex:84-88)
+
+    IO.puts(answer)
+    # => "Elixir is a dynamic, functional programming language..."
+    ```
+  </Tab>
+</Tabs>
+
+## Advanced: Agentic RAG
+
+For complex questions, Arcana provides an agentic pipeline with additional steps:
+
+```elixir
+alias Arcana.Agent
+
+ctx =
+  Agent.new("Compare Elixir and Erlang", repo: MyApp.Repo, llm: llm)
+  |> Agent.gate()        # Decide if retrieval is needed
+  |> Agent.rewrite()     # Clean up conversational input
+  |> Agent.expand()      # Add synonyms and related terms
+  |> Agent.decompose()   # Split multi-part questions
+  |> Agent.search()      # Execute vector search
+  |> Agent.reason()      # Multi-hop: search again if needed
+  |> Agent.rerank()      # Score chunk relevance (0-10)
+  |> Agent.answer()      # Generate final answer
+
+ctx.answer
+```
+
+### Agentic Pipeline Steps
+
+| Step | What it does | Implementation |
+|------|--------------|----------------|
+| `gate/2` | Skip retrieval if answerable from LLM knowledge | Prevents unnecessary searches |
+| `rewrite/2` | Clean conversational input ("Hey, what is X?" → "What is X?") | Improves search quality |
+| `select/2` | Choose relevant collections based on question | LLM picks from available collections |
+| `expand/2` | Add synonyms ("ML" → "ML machine learning models") | Broadens search coverage |
+| `decompose/2` | Split complex questions into sub-questions | Handles multi-part queries |
+| `search/2` | Execute vector search (skipped if gated) | Core retrieval step |
+| `reason/2` | Evaluate results and search again if insufficient | Multi-hop reasoning |
+| `rerank/2` | Score each chunk 0-10 and filter by threshold | Improves precision |
+| `answer/2` | Generate final answer using context or knowledge | Final response |
+
+<Note>
+Every agentic step is **pluggable** - you can replace any component with a custom implementation. See the [Agentic RAG Guide](/guides/agentic-rag) for details.
+</Note>
+
+## Pipeline Configuration
+
+Configure pipeline components in your `config.exs`:
+
+```elixir
+config :arcana,
+  # Chunking
+  chunker: {:default, chunk_size: 512, chunk_overlap: 100},
+  
+  # Embeddings
+  embedder: {:local, model: "BAAI/bge-small-en-v1.5"},
+  # embedder: {:openai, model: "text-embedding-3-large"},
+  
+  # Vector store
+  vector_store: :pgvector,  # or :memory for testing
+  
+  # LLM
+  llm: "openai:gpt-4o-mini"
+  # llm: "anthropic:claude-sonnet-4-20250514"
+```
+
+## Telemetry Events
+
+Arcana emits telemetry events for every pipeline step:
+
+```elixir
+:telemetry.attach_many(
+  "arcana-handler",
+  [
+    [:arcana, :ingest, :start],
+    [:arcana, :ingest, :stop],
+    [:arcana, :search, :start],
+    [:arcana, :search, :stop],
+    [:arcana, :embed, :start],
+    [:arcana, :embed, :stop],
+    [:arcana, :ask, :start],
+    [:arcana, :ask, :stop]
+  ],
+  &MyApp.TelemetryHandler.handle_event/4,
+  nil
+)
+```
+
+See the [Telemetry Guide](/guides/telemetry) for monitoring and debugging.
+
+## GraphRAG Enhancement
+
+Optionally enhance retrieval with knowledge graphs:
+
+```elixir
+# Ingest with entity extraction
+{:ok, document} = Arcana.ingest(content, 
+  repo: MyApp.Repo, 
+  graph: true
+)
+
+# Search combines vector + graph traversal with RRF
+{:ok, results} = Arcana.search("Who leads OpenAI?", 
+  repo: MyApp.Repo,
+  graph: true
+)
+```
+
+**GraphRAG adds:**
+1. Entity extraction (people, orgs, technologies)
+2. Relationship detection between entities
+3. Community clustering (Leiden algorithm)
+4. Fusion search (combines vector + graph results)
+
+Location: `lib/arcana/graph/`
+
+See the [GraphRAG Guide](/guides/graphrag) for details.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Chunk Size" icon="scissors">
+    Use 400-600 tokens for general content. Smaller chunks (200-300) for precise retrieval, larger (800-1000) for broader context.
+  </Card>
+  
+  <Card title="Overlap" icon="code-merge">
+    10-15% overlap ensures concepts spanning chunk boundaries aren't lost. Default 50 tokens works well for 450-token chunks.
+  </Card>
+  
+  <Card title="Search Limit" icon="magnifying-glass">
+    Retrieve 3-5 chunks for simple questions, 10-15 for complex queries. More context helps but increases LLM costs.
+  </Card>
+  
+  <Card title="Hybrid Search" icon="shuffle">
+    Use hybrid mode when users search with specific terms or names. Semantic-only works well for conceptual queries.
+  </Card>
+</CardGroup>
+
+<Warning>
+**Context Window Limits**: Ensure total context size fits your LLM's window. GPT-4o has 128K tokens, but costs scale with context size.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Chunking Strategies" icon="scissors" href="/core-concepts/chunking">
+    Learn how to optimize text splitting for better retrieval
+  </Card>
+  
+  <Card title="Embeddings" icon="brain" href="/core-concepts/embeddings">
+    Understand vector representations and model selection
+  </Card>
+  
+  <Card title="Search Modes" icon="magnifying-glass" href="/core-concepts/search-modes">
+    Compare semantic, full-text, and hybrid search
+  </Card>
+  
+  <Card title="Agentic RAG" icon="robot" href="/guides/agentic-rag">
+    Build sophisticated RAG pipelines with multi-hop reasoning
+  </Card>
+</CardGroup>

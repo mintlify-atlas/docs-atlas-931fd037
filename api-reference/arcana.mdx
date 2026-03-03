@@ -1,0 +1,435 @@
+---
+title: "Arcana"
+description: "Main Arcana module with document management and RAG operations"
+---
+
+The `Arcana` module is the primary interface for RAG (Retrieval Augmented Generation) operations in Elixir. It provides document ingestion, vector search, and question answering capabilities that integrate with any Phoenix/Ecto application.
+
+## Overview
+
+Arcana provides a complete RAG pipeline:
+
+1. **Ingest** documents and files with automatic chunking and embedding
+2. **Search** using semantic, fulltext, or hybrid modes
+3. **Ask** questions with context-aware LLM responses
+4. **Delete** documents and their associated chunks
+
+## Core Functions
+
+### ingest/2
+
+Ingests text content, creating a document with embedded chunks.
+
+```elixir
+ingest(text, opts) :: {:ok, %Arcana.Document{}} | {:error, term()}
+```
+
+<ParamField path="text" type="string" required>
+  The text content to ingest
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  Options for ingestion:
+  
+  <ParamField path="repo" type="module" required>
+    The Ecto repo to use for database operations
+  </ParamField>
+  
+  <ParamField path="source_id" type="string">
+    Optional identifier for grouping/filtering documents
+  </ParamField>
+  
+  <ParamField path="metadata" type="map">
+    Optional metadata to store with the document
+  </ParamField>
+  
+  <ParamField path="chunk_size" type="integer" default="1024">
+    Maximum chunk size in characters
+  </ParamField>
+  
+  <ParamField path="chunk_overlap" type="integer" default="200">
+    Overlap between chunks in characters
+  </ParamField>
+  
+  <ParamField path="collection" type="string | map" default='"default"'>
+    Collection name (string) or map with `:name` and `:description` keys
+  </ParamField>
+  
+  <ParamField path="graph" type="boolean">
+    Enable GraphRAG entity/relationship extraction (overrides config default)
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ok" type="{:ok, %Arcana.Document{}}">
+  Returns the created document with fields:
+  - `id` - UUID of the document
+  - `content` - Original text content
+  - `source_id` - Optional source identifier
+  - `metadata` - Document metadata
+  - `status` - Processing status (`:completed`, `:failed`, etc.)
+  - `chunk_count` - Number of chunks created
+  - `collection_id` - Associated collection UUID
+</ResponseField>
+
+<ResponseField name="error" type="{:error, term()}">
+  Returns an error tuple if ingestion fails
+</ResponseField>
+
+**Example:**
+
+```elixir
+# Basic ingestion
+{:ok, document} = Arcana.ingest(
+  "Elixir is a functional programming language.",
+  repo: MyApp.Repo
+)
+
+# With metadata and custom chunking
+{:ok, document} = Arcana.ingest(
+  long_article_text,
+  repo: MyApp.Repo,
+  source_id: "blog_post_123",
+  metadata: %{author: "Jane Doe", published: "2024-01-15"},
+  chunk_size: 512,
+  chunk_overlap: 100,
+  collection: %{name: "blog_posts", description: "Company blog articles"}
+)
+```
+
+### ingest_file/2
+
+Ingests a file by parsing its content and creating a document with embedded chunks.
+
+```elixir
+ingest_file(path, opts) :: {:ok, %Arcana.Document{}} | {:error, term()}
+```
+
+<ParamField path="path" type="string" required>
+  Path to the file to ingest. Supports plain text, markdown, and PDF formats.
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  Options (same as `ingest/2`):
+  
+  <ParamField path="repo" type="module" required>
+    The Ecto repo to use
+  </ParamField>
+  
+  <ParamField path="source_id" type="string">
+    Optional identifier for grouping/filtering
+  </ParamField>
+  
+  <ParamField path="metadata" type="map">
+    Optional metadata map
+  </ParamField>
+  
+  <ParamField path="chunk_size" type="integer" default="1024">
+    Maximum chunk size in characters
+  </ParamField>
+  
+  <ParamField path="chunk_overlap" type="integer" default="200">
+    Overlap between chunks
+  </ParamField>
+  
+  <ParamField path="collection" type="string" default='"default"'>
+    Collection name to organize the document
+  </ParamField>
+</ParamField>
+
+**Example:**
+
+```elixir
+# Ingest a markdown file
+{:ok, document} = Arcana.ingest_file(
+  "/path/to/docs/README.md",
+  repo: MyApp.Repo,
+  collection: "documentation",
+  metadata: %{category: "readme"}
+)
+
+# Ingest a PDF with custom chunking
+{:ok, document} = Arcana.ingest_file(
+  "/path/to/report.pdf",
+  repo: MyApp.Repo,
+  source_id: "annual_report_2024",
+  chunk_size: 2048,
+  chunk_overlap: 400
+)
+```
+
+### search/2
+
+Searches for chunks similar to the query using semantic, fulltext, or hybrid search.
+
+```elixir
+search(query, opts) :: {:ok, [result]} | {:error, term()}
+```
+
+<ParamField path="query" type="string" required>
+  The search query text
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  Search options:
+  
+  <ParamField path="repo" type="module" required>
+    The Ecto repo to use (required for pgvector backend)
+  </ParamField>
+  
+  <ParamField path="limit" type="integer" default="10">
+    Maximum number of results to return
+  </ParamField>
+  
+  <ParamField path="mode" type="atom" default=":semantic">
+    Search mode: `:semantic`, `:fulltext`, or `:hybrid`
+  </ParamField>
+  
+  <ParamField path="source_id" type="string">
+    Filter results to a specific source
+  </ParamField>
+  
+  <ParamField path="threshold" type="float" default="0.0">
+    Minimum similarity score (0.0 to 1.0)
+  </ParamField>
+  
+  <ParamField path="collection" type="string">
+    Filter results to a specific collection by name
+  </ParamField>
+  
+  <ParamField path="collections" type="list(string)">
+    Filter results to multiple collections
+  </ParamField>
+  
+  <ParamField path="semantic_weight" type="float" default="0.5">
+    Weight for semantic scores in hybrid mode (0.0 to 1.0)
+  </ParamField>
+  
+  <ParamField path="fulltext_weight" type="float" default="0.5">
+    Weight for fulltext scores in hybrid mode (0.0 to 1.0)
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ok" type="{:ok, [result]}">
+  Returns a list of result maps, each containing:
+  - `id` - Chunk UUID
+  - `text` - The chunk text content
+  - `document_id` - Parent document UUID
+  - `chunk_index` - Position in the document
+  - `score` - Similarity/relevance score
+</ResponseField>
+
+**Example:**
+
+```elixir
+# Semantic search
+{:ok, results} = Arcana.search(
+  "What is functional programming?",
+  repo: MyApp.Repo,
+  limit: 5
+)
+
+# Hybrid search with custom weights
+{:ok, results} = Arcana.search(
+  "elixir concurrency",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.7,
+  fulltext_weight: 0.3,
+  collection: "documentation"
+)
+
+IO.inspect(results)
+# [
+#   %{
+#     id: "550e8400-e29b-41d4-a716-446655440000",
+#     text: "Elixir provides lightweight processes...",
+#     document_id: "660e8400-e29b-41d4-a716-446655440000",
+#     chunk_index: 3,
+#     score: 0.87
+#   },
+#   ...
+# ]
+```
+
+### ask/2
+
+Ask questions using RAG (Retrieval Augmented Generation) with context from your knowledge base.
+
+```elixir
+ask(question, opts) :: {:ok, answer, context} | {:error, term()}
+```
+
+<ParamField path="question" type="string" required>
+  The question to ask
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  Ask options:
+  
+  <ParamField path="repo" type="module" required>
+    The Ecto repo to use
+  </ParamField>
+  
+  <ParamField path="llm" type="term" required>
+    LLM implementing the `Arcana.LLM` protocol (e.g., `"openai:gpt-4o-mini"`)
+  </ParamField>
+  
+  <ParamField path="limit" type="integer" default="5">
+    Maximum number of context chunks to retrieve
+  </ParamField>
+  
+  <ParamField path="mode" type="atom" default=":semantic">
+    Search mode for context retrieval: `:semantic`, `:fulltext`, or `:hybrid`
+  </ParamField>
+  
+  <ParamField path="source_id" type="string">
+    Filter context to a specific source
+  </ParamField>
+  
+  <ParamField path="threshold" type="float" default="0.0">
+    Minimum similarity score for context chunks
+  </ParamField>
+  
+  <ParamField path="collection" type="string">
+    Filter context to a specific collection
+  </ParamField>
+  
+  <ParamField path="collections" type="list(string)">
+    Filter context to multiple collections
+  </ParamField>
+  
+  <ParamField path="prompt" type="function">
+    Custom prompt function: `fn question, context -> system_prompt_string end`
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ok" type="{:ok, answer, context}">
+  Returns a tuple with:
+  - `answer` - The LLM's response string
+  - `context` - List of context chunks used
+</ResponseField>
+
+**Example:**
+
+```elixir
+# Basic question answering
+{:ok, answer, context} = Arcana.ask(
+  "What are the benefits of Elixir?",
+  repo: MyApp.Repo,
+  llm: "openai:gpt-4o-mini"
+)
+
+IO.puts(answer)
+# "Based on the documentation, Elixir offers several benefits..."
+
+# With custom prompt
+{:ok, answer, _context} = Arcana.ask(
+  "Summarize the key features",
+  repo: MyApp.Repo,
+  llm: my_llm_config,
+  collection: "product_docs",
+  limit: 3,
+  prompt: fn question, context ->
+    """
+    You are a technical writer. Be concise and use bullet points.
+    Answer based on the following documentation excerpts.
+    
+    Question: #{question}
+    """
+  end
+)
+```
+
+### delete/2
+
+Deletes a document and all its associated chunks from the knowledge base.
+
+```elixir
+delete(document_id, opts) :: :ok | {:error, :not_found}
+```
+
+<ParamField path="document_id" type="string" required>
+  UUID of the document to delete
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  <ParamField path="repo" type="module" required>
+    The Ecto repo to use
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ok" type=":ok">
+  Returns `:ok` if the document was successfully deleted
+</ResponseField>
+
+<ResponseField name="error" type="{:error, :not_found}">
+  Returns an error if the document doesn't exist
+</ResponseField>
+
+**Example:**
+
+```elixir
+# Delete a document
+:ok = Arcana.delete(
+  "550e8400-e29b-41d4-a716-446655440000",
+  repo: MyApp.Repo
+)
+
+# Handle not found
+case Arcana.delete(document_id, repo: MyApp.Repo) do
+  :ok -> Logger.info("Document deleted")
+  {:error, :not_found} -> Logger.warn("Document not found")
+end
+```
+
+## Configuration Functions
+
+### config/0
+
+Returns the current Arcana configuration.
+
+```elixir
+config() :: map()
+```
+
+**Example:**
+
+```elixir
+config = Arcana.config()
+IO.inspect(config)
+# %{
+#   embedder: {Arcana.Embedders.OpenAI, [model: "text-embedding-3-small"]},
+#   chunker: {Arcana.Chunkers.Simple, []},
+#   graph_enabled: true
+# }
+```
+
+### embedder/0
+
+Returns the configured embedder as a `{module, opts}` tuple.
+
+```elixir
+embedder() :: {module(), keyword()}
+```
+
+### chunker/0
+
+Returns the configured chunker as a `{module, opts}` tuple.
+
+```elixir
+chunker() :: {module(), keyword()}
+```
+
+### graph_enabled?/1
+
+Checks whether GraphRAG is enabled for the given options.
+
+```elixir
+graph_enabled?(opts) :: boolean()
+```
+
+## Related Modules
+
+- [Arcana.Ingest](/api-reference/ingest) - Detailed ingestion documentation
+- [Arcana.Search](/api-reference/search) - Detailed search documentation
+- [Arcana.Ask](/api-reference/ask) - Detailed RAG Q&A documentation

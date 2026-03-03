@@ -1,0 +1,436 @@
+---
+title: Relationship Detection
+description: Extracting semantic relationships between entities
+---
+
+## Overview
+
+Relationship extraction identifies **semantic connections** between entities in your knowledge graph. After extracting entities from text, relationships describe how those entities are connected.
+
+For example:
+- "Sam Altman" **LEADS** "OpenAI"
+- "OpenAI" **FOUNDED_BY** "Sam Altman"
+- "GPT-4" **DEVELOPED_BY** "OpenAI"
+
+Arcana provides two built-in implementations:
+
+- **LLM** - Context-aware extraction using language models (default)
+- **Co-occurrence** - Simple proximity-based relationships (no LLM required)
+
+## How Relationship Extraction Works
+
+Relationships are extracted **after** entities are identified:
+
+```elixir
+text = "Sam Altman is CEO of OpenAI."
+
+# 1. Entities already extracted
+entities = [
+  %{name: "Sam Altman", type: "person"},
+  %{name: "OpenAI", type: "organization"}
+]
+
+# 2. Extract relationships between these entities
+{:ok, relationships} = RelationshipExtractor.extract(extractor, text, entities)
+
+# Result:
+[
+  %{
+    source: "Sam Altman",
+    target: "OpenAI",
+    type: "LEADS",
+    description: "CEO of",
+    strength: 10
+  }
+]
+
+# 3. Store in graph
+# Creates edge: Sam Altman --[LEADS]--> OpenAI
+```
+
+See implementation in `lib/arcana/graph/graph_builder.ex:196`
+
+## Relationship Extractors
+
+### LLM Extractor (Default)
+
+Uses your configured LLM to identify semantic relationships with context awareness.
+
+**Configuration:**
+```elixir
+config :arcana, :graph,
+  relationship_extractor: {Arcana.Graph.RelationshipExtractor.LLM, []}
+```
+
+The LLM is automatically injected from your graph pipeline configuration.
+
+**Example:**
+```elixir
+extractor = {Arcana.Graph.RelationshipExtractor.LLM, llm: &MyApp.llm/3}
+
+text = """
+Sam Altman is CEO of OpenAI, which developed GPT-4. 
+The company was founded in San Francisco.
+"""
+
+entities = [
+  %{name: "Sam Altman", type: "person"},
+  %{name: "OpenAI", type: "organization"},
+  %{name: "GPT-4", type: "technology"},
+  %{name: "San Francisco", type: "location"}
+]
+
+{:ok, relationships} = Arcana.Graph.RelationshipExtractor.extract(
+  extractor,
+  text,
+  entities
+)
+
+# Returns:
+[
+  %{
+    source: "Sam Altman",
+    target: "OpenAI",
+    type: "LEADS",
+    description: "CEO of",
+    strength: 10
+  },
+  %{
+    source: "OpenAI",
+    target: "GPT-4",
+    type: "DEVELOPED",
+    description: "developed the technology",
+    strength: 9
+  },
+  %{
+    source: "OpenAI",
+    target: "San Francisco",
+    type: "LOCATED_IN",
+    description: "company founded in",
+    strength: 7
+  }
+]
+```
+
+See `lib/arcana/graph/relationship_extractor/llm.ex:23`
+
+**Advantages:**
+- 🎯 Context-aware - Understands semantic meaning
+- 🔧 Flexible - Identifies diverse relationship types
+- 📊 Strength scoring - Rates relationship importance
+- 📝 Descriptive - Includes natural language descriptions
+
+**Limitations:**
+- 🐌 Slower - Requires LLM calls
+- 💸 Costly - LLM API fees
+- 🎲 Non-deterministic - Output may vary
+
+### Co-occurrence Extractor
+
+Creates relationships based on entity proximity in text. Useful when LLM costs are prohibitive or for initial graph construction.
+
+**Configuration:**
+```elixir
+config :arcana, :graph,
+  relationship_extractor: {Arcana.Graph.RelationshipExtractor.Cooccurrence, 
+    window_size: 100
+  }
+```
+
+**How it works:**
+- Entities appearing within a text window are connected
+- Relationship type is "CO_OCCURS_WITH"
+- Strength based on proximity (closer = stronger)
+
+**Advantages:**
+- ⚡ Fast - No LLM calls
+- 💰 Free - No API costs
+- 🔒 Private - No external calls
+
+**Limitations:**
+- 📊 Generic - All relationships have same type
+- ❌ No semantics - Doesn't understand meaning
+- 🎯 Less accurate - May connect unrelated entities
+
+### Disabling Relationships
+
+Set to `nil` to skip relationship extraction:
+
+```elixir
+config :arcana, :graph,
+  relationship_extractor: nil
+```
+
+This creates an entity-only graph without edges, which is faster but less useful for graph traversal.
+
+## Custom Extractors
+
+Implement the `Arcana.Graph.RelationshipExtractor` behaviour:
+
+```elixir
+defmodule MyApp.PatternExtractor do
+  @behaviour Arcana.Graph.RelationshipExtractor
+
+  # Patterns like "X is CEO of Y" -> LEADS relationship
+  @patterns [
+    {~r/(\w+)\s+is\s+CEO\s+of\s+(\w+)/i, "LEADS"},
+    {~r/(\w+)\s+founded\s+(\w+)/i, "FOUNDED"},
+    {~r/(\w+)\s+works\s+at\s+(\w+)/i, "WORKS_AT"},
+    {~r/(\w+)\s+developed\s+(\w+)/i, "DEVELOPED"}
+  ]
+
+  @impl true
+  def extract(text, entities, opts) do
+    patterns = Keyword.get(opts, :patterns, @patterns)
+    entity_names = MapSet.new(entities, & &1.name)
+    
+    relationships =
+      patterns
+      |> Enum.flat_map(fn {pattern, rel_type} ->
+        extract_pattern(text, pattern, rel_type, entity_names)
+      end)
+    
+    {:ok, relationships}
+  end
+
+  defp extract_pattern(text, pattern, rel_type, entity_names) do
+    Regex.scan(pattern, text)
+    |> Enum.map(fn [_full, source, target] ->
+      # Verify both entities exist
+      if MapSet.member?(entity_names, source) and 
+         MapSet.member?(entity_names, target) do
+        %{
+          source: source,
+          target: target,
+          type: rel_type,
+          strength: 8
+        }
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+end
+```
+
+**Configure:**
+```elixir
+config :arcana, :graph,
+  relationship_extractor: {MyApp.PatternExtractor, 
+    patterns: [...]  # Custom patterns
+  }
+```
+
+See behaviour definition in `lib/arcana/graph/relationship_extractor.ex:63`
+
+## Relationship Format
+
+All extractors must return relationships as maps with:
+
+**Required Fields:**
+- `:source` (string) - Name of the source entity
+- `:target` (string) - Name of the target entity
+- `:type` (string) - Relationship type (e.g., "LEADS", "FOUNDED")
+
+**Optional Fields:**
+- `:description` (string) - Natural language description
+- `:strength` (integer 1-10) - Relationship importance/confidence
+
+See format specification in `lib/arcana/graph/relationship_extractor.ex:51`
+
+## Real Examples from Source
+
+### Example 1: LLM Prompt
+
+From `lib/arcana/graph/relationship_extractor/llm.ex:57`:
+
+```elixir
+def build_prompt(text, entities) do
+  entity_list =
+    Enum.map_join(entities, "\n", fn %{name: name, type: type} ->
+      "- #{name} (#{type})"
+    end)
+
+  """
+  Analyze the following text and extract relationships between the entities listed below.
+
+  ## Text to analyze:
+  #{text}
+
+  ## Entities to find relationships between:
+  #{entity_list}
+
+  ## Instructions:
+  1. Identify all meaningful relationships between the listed entities
+  2. Only include relationships that are explicitly or strongly implied in the text
+  3. Use descriptive relationship types in UPPER_SNAKE_CASE (e.g., WORKS_AT, FOUNDED, LEADS, LOCATED_IN)
+  4. Rate the strength of each relationship from 1-10 based on how explicit and central it is to the text
+
+  ## Output format:
+  Return a JSON array of relationship objects. Each object should have:
+  - "source": Name of the source entity (exactly as listed above)
+  - "target": Name of the target entity (exactly as listed above)
+  - "type": Relationship type in UPPER_SNAKE_CASE
+  - "description": Brief description of the relationship (optional)
+  - "strength": Integer from 1-10 indicating relationship strength (optional)
+
+  Return only the JSON array, no other text.
+  """
+end
+```
+
+### Example 2: Validation
+
+From `lib/arcana/graph/relationship_extractor/llm.ex:160`:
+
+```elixir
+defp valid_relationship?(%{source: source, target: target, type: type}, entity_names) do
+  # Relationship is valid if:
+  is_binary(source) and              # Source is a string
+    is_binary(target) and            # Target is a string
+    is_binary(type) and              # Type is a string
+    source != target and             # Not self-referential
+    MapSet.member?(entity_names, source) and  # Source entity exists
+    MapSet.member?(entity_names, target)      # Target entity exists
+end
+```
+
+### Example 3: Type Normalization
+
+From `lib/arcana/graph/relationship_extractor/llm.ex:137`:
+
+```elixir
+defp normalize_type(nil), do: nil
+
+defp normalize_type(type) when is_binary(type) do
+  type
+  |> String.upcase()                # Convert to uppercase
+  |> String.replace(~r/[^A-Z0-9_]/, "_")  # Replace non-alphanumeric with _
+end
+
+# Examples:
+normalize_type("works at")    # => "WORKS_AT"
+normalize_type("CEO of")      # => "CEO_OF"
+normalize_type("founded-by")  # => "FOUNDED_BY"
+```
+
+### Example 4: Strength Scoring
+
+From `lib/arcana/graph/relationship_extractor/llm.ex:145`:
+
+```elixir
+defp normalize_strength(nil), do: nil
+
+defp normalize_strength(strength) when is_integer(strength) do
+  strength
+  |> max(1)   # Minimum 1
+  |> min(10)  # Maximum 10
+end
+
+defp normalize_strength(strength) when is_binary(strength) do
+  case Integer.parse(strength) do
+    {val, _} -> normalize_strength(val)
+    :error -> nil
+  end
+end
+```
+
+## Common Relationship Types
+
+Based on typical knowledge graphs:
+
+**People & Organizations:**
+- `WORKS_AT` - Employment relationship
+- `LEADS` - Leadership role (CEO, CTO, etc.)
+- `FOUNDED` - Founder relationship
+- `MEMBER_OF` - Membership in organization
+- `ADVISES` - Advisory role
+
+**Organizations & Locations:**
+- `LOCATED_IN` - Physical location
+- `HEADQUARTERED_IN` - Main office location
+- `OPERATES_IN` - Areas of operation
+
+**Products & Organizations:**
+- `DEVELOPED_BY` - Creator relationship
+- `OWNED_BY` - Ownership
+- `ACQUIRED_BY` - Acquisition
+- `COMPETES_WITH` - Competition
+
+**Technical:**
+- `USES` - Technology dependency
+- `BUILT_WITH` - Implementation technology
+- `INTEGRATES_WITH` - Integration
+- `REPLACES` - Replacement/successor
+
+**Research:**
+- `CITES` - Citation
+- `AUTHORED_BY` - Authorship
+- `PUBLISHED_IN` - Publication venue
+- `BASED_ON` - Theoretical foundation
+
+## Configuration Options
+
+### Inline Function
+
+```elixir
+config :arcana, :graph,
+  relationship_extractor: fn text, entities, _opts ->
+    # Custom logic
+    {:ok, [%{source: "A", target: "B", type: "RELATES_TO"}]}
+  end
+```
+
+### Module with Options
+
+```elixir
+config :arcana, :graph,
+  relationship_extractor: {MyApp.CustomExtractor,
+    mode: :strict,
+    min_strength: 5
+  }
+```
+
+### Per-Call Override
+
+```elixir
+Arcana.Graph.build(chunks,
+  entity_extractor: {EntityExtractor.NER, []},
+  relationship_extractor: {MyApp.SpecialExtractor, mode: :permissive}
+)
+```
+
+## Performance Considerations
+
+**LLM Extractor:**
+- ~500-2000ms per chunk
+- Cost: ~$0.001-0.02 per chunk (varies by model and relationship count)
+- Parallelizable: Yes (concurrent API calls)
+
+**Co-occurrence Extractor:**
+- ~10-50ms per chunk
+- Cost: Free
+- Parallelizable: Yes
+
+**Optimization Tips:**
+1. Extract relationships only for chunks with multiple entities
+2. Use co-occurrence for initial graph, LLM for refinement
+3. Cache relationships by (chunk_hash, entity_set)
+4. Batch LLM calls when possible
+5. Use parallel processing (see `lib/arcana/graph.ex:361`)
+
+## Validation
+
+Relationships are automatically validated:
+
+1. **Entity existence**: Both source and target must be in the entity list
+2. **No self-loops**: Source ≠ Target
+3. **Valid types**: Non-empty string types
+4. **Strength range**: 1-10 if provided
+
+Invalid relationships are silently filtered out.
+
+## Next Steps
+
+- [Communities](/api-reference/graph/communities) - Detect communities from relationships
+- [Search](/api-reference/graph/search) - Traverse relationships during search
+- [Entity Extraction](/api-reference/graph/entities) - Configure entity extractors

@@ -1,0 +1,210 @@
+---
+title: Agent.rewrite/2
+description: Rewrite conversational input into a clear search query
+---
+
+## Function Signature
+
+```elixir
+rewrite(ctx, opts \\ [])
+```
+
+Rewrites conversational input into a clear search query by removing noise while preserving the core question.
+
+## Purpose
+
+Uses the LLM to remove conversational noise (greetings, filler phrases) while preserving the core question and all important terms.
+
+This step should run **before** `expand/2` and `decompose/2` to clean up the input before further transformations.
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()">
+  Options for the rewrite step
+</ParamField>
+
+### Options
+
+<ParamField path="rewriter" type="module | function">
+  Custom rewriter module or function (default: `Arcana.Agent.Rewriter.LLM`)
+  
+  - **Module**: Must implement `rewrite/2` callback
+  - **Function**: Signature `fn question, opts -> {:ok, rewritten} | {:error, reason} end`
+</ParamField>
+
+<ParamField path="prompt" type="function">
+  Custom prompt function `fn question -> prompt_string end`
+  
+  Only used by the default LLM rewriter.
+</ParamField>
+
+<ParamField path="llm" type="function">
+  Override the LLM function for this step
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="rewritten_query" type="string | nil">
+  The cleaned search query. Set to `nil` if rewriting fails.
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```elixir
+ctx = Arcana.Agent.new("Hey there! Can you tell me about Elixir?")
+|> Arcana.Agent.rewrite()
+|> Arcana.Agent.expand()
+|> Arcana.Agent.search()
+|> Arcana.Agent.answer()
+
+ctx.question
+# => "Hey there! Can you tell me about Elixir?"
+
+ctx.rewritten_query
+# => "about Elixir"
+```
+
+### Custom Rewriter Module
+
+```elixir
+defmodule MyApp.RegexRewriter do
+  @behaviour Arcana.Agent.Rewriter
+
+  @impl true
+  def rewrite(question, _opts) do
+    cleaned =
+      question
+      |> String.downcase()
+      |> String.replace(~r/^(hey|hi|hello),?\s*/i, "")
+      |> String.replace(~r/\b(can you|please|tell me)\b/i, "")
+      |> String.trim()
+
+    {:ok, cleaned}
+  end
+end
+
+# Usage
+ctx
+|> Arcana.Agent.rewrite(rewriter: MyApp.RegexRewriter)
+```
+
+### Inline Rewriter Function
+
+```elixir
+ctx
+|> Arcana.Agent.rewrite(
+  rewriter: fn question, _opts ->
+    # Simple rewriter: just lowercase and trim
+    {:ok, String.downcase(question) |> String.trim()}
+  end
+)
+```
+
+### With Custom Prompt
+
+```elixir
+ctx
+|> Arcana.Agent.rewrite(
+  prompt: fn question ->
+    """
+    Extract the core search query from this input.
+    Remove greetings and filler words, keep technical terms.
+    
+    Input: #{question}
+    
+    Output only the clean query, nothing else.
+    """
+  end
+)
+```
+
+## Query Transformation Chain
+
+The rewritten query becomes part of the transformation chain:
+
+```elixir
+ctx
+|> Arcana.Agent.rewrite()  # Sets rewritten_query
+|> Arcana.Agent.expand()   # Uses rewritten_query as input
+|> Arcana.Agent.search()   # Uses expanded_query (based on rewritten_query)
+```
+
+Priority: `expanded_query` → `rewritten_query` → `question`
+
+## Examples of Rewrites
+
+| Original | Rewritten |
+|----------|----------|
+| "Hey, tell me about Elixir" | "about Elixir" |
+| "Can you please explain processes?" | "explain processes" |
+| "I'd like to know how GenServer works" | "how GenServer works" |
+| "What's the deal with supervision trees?" | "supervision trees" |
+
+## Custom Rewriter Behaviour
+
+```elixir
+defmodule Arcana.Agent.Rewriter do
+  @callback rewrite(question :: String.t(), opts :: Keyword.t()) ::
+              {:ok, String.t()} | {:error, term()}
+end
+```
+
+Implement this behaviour for custom rewriters:
+
+```elixir
+defmodule MyApp.ThesaurusRewriter do
+  @behaviour Arcana.Agent.Rewriter
+
+  @impl true
+  def rewrite(question, opts) do
+    # Your custom logic
+    cleaned = clean_and_normalize(question)
+    {:ok, cleaned}
+  end
+
+  defp clean_and_normalize(question) do
+    # Implementation
+  end
+end
+```
+
+## Telemetry Event
+
+Emits `[:arcana, :agent, :rewrite]` with metadata:
+
+```elixir
+# Start metadata
+%{
+  question: ctx.question,
+  rewriter: Arcana.Agent.Rewriter.LLM  # or :custom_function
+}
+
+# Stop metadata
+%{rewritten_query: "cleaned query"}
+```
+
+## When to Use
+
+Use `rewrite/2` when:
+
+- Users input conversational queries with noise
+- You want to normalize queries before expansion
+- Your system handles natural language input (chatbots, voice interfaces)
+
+## Best Practices
+
+1. **Place early in pipeline** - Before expand/decompose for best results
+2. **Preserve technical terms** - Don't remove domain-specific vocabulary
+3. **Keep question intent** - Don't change the meaning, just remove noise
+4. **Handle edge cases** - Already-clean queries should pass through unchanged
+
+## See Also
+
+- [expand/2](/api-reference/agent/expand) - Add synonyms and related terms
+- [decompose/2](/api-reference/agent/decompose) - Break into sub-questions

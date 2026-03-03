@@ -1,0 +1,655 @@
+---
+title: Vector Store Configuration
+description: Configure storage backends for embeddings in Arcana
+---
+
+Arcana supports multiple vector storage backends for storing and searching embeddings. Choose pgvector for production or the in-memory backend for development and testing.
+
+## Quick Start
+
+```elixir
+# config/config.exs
+
+# pgvector (default) - Production-ready PostgreSQL storage
+config :arcana, vector_store: :pgvector
+
+# In-memory (HNSWLib) - Development and testing
+config :arcana, vector_store: :memory
+
+# Custom backend
+config :arcana, vector_store: MyApp.CustomVectorStore
+```
+
+## pgvector Backend
+
+The default backend using PostgreSQL with the pgvector extension. Recommended for production.
+
+### Setup
+
+<Steps>
+  <Step title="Start PostgreSQL with pgvector">
+    Use the official pgvector Docker image:
+
+    ```yaml docker-compose.yml
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        ports:
+          - "5432:5432"
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: myapp_dev
+    ```
+
+    Or install pgvector on existing PostgreSQL:
+
+    ```bash
+    # Ubuntu/Debian
+    apt install postgresql-16-pgvector
+
+    # macOS (Homebrew)
+    brew install pgvector
+
+    # From source
+    git clone https://github.com/pgvector/pgvector.git
+    cd pgvector
+    make
+    sudo make install
+    ```
+  </Step>
+
+  <Step title="Configure Postgrex Types">
+    Create a Postgrex types module:
+
+    ```elixir lib/my_app/postgrex_types.ex
+    Postgrex.Types.define(
+      MyApp.PostgrexTypes,
+      [Pgvector.Extensions.Vector] ++ Ecto.Adapters.Postgres.extensions(),
+      []
+    )
+    ```
+
+    Add to your repo config:
+
+    ```elixir config/config.exs
+    config :my_app, MyApp.Repo,
+      types: MyApp.PostgrexTypes
+    ```
+  </Step>
+
+  <Step title="Run Migrations">
+    Install Arcana migrations:
+
+    ```bash
+    mix arcana.install
+    mix ecto.migrate
+    ```
+  </Step>
+
+  <Step title="Configure Arcana">
+    pgvector is the default, but you can be explicit:
+
+    ```elixir config/config.exs
+    config :arcana, vector_store: :pgvector
+    ```
+  </Step>
+</Steps>
+
+### Features
+
+<CardGroup cols={2}>
+  <Card title="Persistent Storage" icon="hard-drive">
+    Data survives restarts and can be backed up like any PostgreSQL database.
+  </Card>
+
+  <Card title="Scalable" icon="arrow-up-right-dots">
+    Handles millions of vectors with proper indexing (IVFFlat, HNSW).
+  </Card>
+
+  <Card title="Hybrid Search" icon="merge">
+    Combines vector similarity with PostgreSQL full-text search in a single query.
+  </Card>
+
+  <Card title="ACID Guarantees" icon="shield-check">
+    Transactions, consistency, and reliability of PostgreSQL.
+  </Card>
+</CardGroup>
+
+### Hybrid Search
+
+pgvector supports combining semantic and full-text search:
+
+```elixir
+# Semantic search only
+{:ok, results} = Arcana.search("machine learning",
+  repo: MyApp.Repo,
+  mode: :semantic
+)
+
+# Full-text search only
+{:ok, results} = Arcana.search("machine learning",
+  repo: MyApp.Repo,
+  mode: :fulltext
+)
+
+# Hybrid search (combines both with RRF)
+{:ok, results} = Arcana.search("machine learning",
+  repo: MyApp.Repo,
+  mode: :hybrid
+)
+
+# Custom weights for hybrid search
+{:ok, results} = Arcana.search("machine learning",
+  repo: MyApp.Repo,
+  mode: :hybrid,
+  semantic_weight: 0.7,  # Weight for vector similarity
+  fulltext_weight: 0.3   # Weight for keyword matching
+)
+```
+
+<Note>
+  Hybrid search uses min-max normalization to fairly combine semantic scores (0-1 range) with full-text scores (variable range).
+</Note>
+
+### Indexing
+
+For large datasets, create vector indexes:
+
+<Tabs>
+  <Tab title="IVFFlat Index">
+    **Best for:** 10K-1M vectors
+
+    ```sql
+    CREATE INDEX ON arcana_chunks 
+    USING ivfflat (embedding vector_cosine_ops) 
+    WITH (lists = 100);
+    ```
+
+    **Trade-offs:**
+    - Fast queries
+    - Good recall (~95%)
+    - Requires training data
+  </Tab>
+
+  <Tab title="HNSW Index">
+    **Best for:** 100K-10M+ vectors
+
+    ```sql
+    CREATE INDEX ON arcana_chunks 
+    USING hnsw (embedding vector_cosine_ops) 
+    WITH (m = 16, ef_construction = 64);
+    ```
+
+    **Trade-offs:**
+    - Excellent recall (~99%)
+    - Slower inserts
+    - More storage
+  </Tab>
+</Tabs>
+
+### Performance Tuning
+
+```elixir
+# Adjust similarity threshold to filter low-quality results
+{:ok, results} = Arcana.search("query",
+  repo: MyApp.Repo,
+  threshold: 0.7  # Only return results with >0.7 similarity
+)
+
+# Filter by collection for faster queries
+{:ok, results} = Arcana.search("query",
+  repo: MyApp.Repo,
+  collection: "products"  # Only search in "products" collection
+)
+
+# Use source_id to group related documents
+{:ok, results} = Arcana.search("query",
+  repo: MyApp.Repo,
+  source_id: "doc-123"  # Only search within this source
+)
+```
+
+## In-Memory Backend (HNSWLib)
+
+Fast in-memory vector storage using HNSWLib. Perfect for development, testing, and small datasets.
+
+### Setup
+
+<Steps>
+  <Step title="Add Dependency">
+    ```elixir mix.exs
+    defp deps do
+      [
+        {:arcana, "~> 1.0"},
+        {:hnswlib, "~> 0.1"}
+      ]
+    end
+    ```
+  </Step>
+
+  <Step title="Configure Backend">
+    ```elixir config/config.exs
+    config :arcana, vector_store: :memory
+    ```
+  </Step>
+
+  <Step title="Start Memory Server">
+    Add to your supervision tree:
+
+    ```elixir lib/my_app/application.ex
+    def start(_type, _args) do
+      children = [
+        MyApp.Repo,
+        {Arcana.VectorStore.Memory, name: Arcana.VectorStore.Memory}
+      ]
+
+      opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+      Supervisor.start_link(children, opts)
+    end
+    ```
+  </Step>
+</Steps>
+
+### Usage
+
+```elixir
+# Ingest documents (stored in memory)
+{:ok, document} = Arcana.ingest("content", repo: MyApp.Repo)
+
+# Search (uses HNSWLib)
+{:ok, results} = Arcana.search("query", repo: MyApp.Repo)
+
+# Clear all data
+Arcana.VectorStore.clear("default", vector_store: :memory)
+```
+
+### Features
+
+<CardGroup cols={2}>
+  <Card title="Fast Startup" icon="bolt">
+    No database setup required - start searching immediately.
+  </Card>
+
+  <Card title="Great for Testing" icon="flask">
+    Reset state between tests with `clear/2`.
+  </Card>
+
+  <Card title="Low Latency" icon="gauge-high">
+    In-memory search is faster than database queries.
+  </Card>
+
+  <Card title="Limited Scale" icon="triangle-exclamation">
+    Recommended for under 100K vectors per collection.
+  </Card>
+</CardGroup>
+
+### Options
+
+```elixir
+# Configure max elements per collection
+{Arcana.VectorStore.Memory, 
+  name: Arcana.VectorStore.Memory,
+  max_elements: 50_000  # Default: 10,000
+}
+```
+
+### Limitations
+
+<Warning>
+  **Data is not persisted!** All vectors are lost when the process stops. Use pgvector for production.
+</Warning>
+
+- No full-text search (semantic only)
+- No persistence
+- Single-node only
+- Higher memory usage
+
+## Custom Vector Store
+
+Implement the `Arcana.VectorStore` behaviour for custom backends (Pinecone, Weaviate, Qdrant, etc.).
+
+### Implementation
+
+```elixir
+defmodule MyApp.PineconeVectorStore do
+  @behaviour Arcana.VectorStore
+
+  @impl true
+  def store(collection, id, embedding, metadata, opts) do
+    api_key = opts[:api_key] || System.get_env("PINECONE_API_KEY")
+    index = opts[:index] || "default"
+
+    # Upsert to Pinecone
+    case HTTPoison.post(
+      "https://#{index}.pinecone.io/vectors/upsert",
+      Jason.encode!(%{
+        vectors: [%{
+          id: id,
+          values: embedding,
+          metadata: metadata
+        }]
+      }),
+      [{"Api-Key", api_key}, {"Content-Type", "application/json"}]
+    ) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def search(collection, query_embedding, opts) do
+    api_key = opts[:api_key] || System.get_env("PINECONE_API_KEY")
+    index = opts[:index] || "default"
+    limit = opts[:limit] || 10
+
+    # Query Pinecone
+    case HTTPoison.post(
+      "https://#{index}.pinecone.io/query",
+      Jason.encode!(%{
+        vector: query_embedding,
+        topK: limit,
+        includeMetadata: true
+      }),
+      [{"Api-Key", api_key}, {"Content-Type", "application/json"}]
+    ) do
+      {:ok, %{body: body}} ->
+        %{"matches" => matches} = Jason.decode!(body)
+        
+        Enum.map(matches, fn match ->
+          %{
+            id: match["id"],
+            metadata: match["metadata"],
+            score: match["score"]
+          }
+        end)
+
+      {:error, _reason} -> []
+    end
+  end
+
+  @impl true
+  def search_text(_collection, _query_text, _opts) do
+    # Pinecone doesn't support full-text search
+    []
+  end
+
+  @impl true
+  def delete(collection, id, opts) do
+    api_key = opts[:api_key] || System.get_env("PINECONE_API_KEY")
+    index = opts[:index] || "default"
+
+    case HTTPoison.post(
+      "https://#{index}.pinecone.io/vectors/delete",
+      Jason.encode!(%{ids: [id]}),
+      [{"Api-Key", api_key}, {"Content-Type", "application/json"}]
+    ) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def clear(collection, opts) do
+    api_key = opts[:api_key] || System.get_env("PINECONE_API_KEY")
+    index = opts[:index] || "default"
+
+    # Delete all vectors with collection metadata
+    case HTTPoison.post(
+      "https://#{index}.pinecone.io/vectors/delete",
+      Jason.encode!(%{deleteAll: true}),
+      [{"Api-Key", api_key}, {"Content-Type", "application/json"}]
+    ) do
+      {:ok, _} -> :ok
+      {:error, _} -> :ok
+    end
+  end
+end
+```
+
+### Configuration
+
+```elixir
+# config/config.exs
+config :arcana, vector_store: MyApp.PineconeVectorStore
+
+# With default options
+config :arcana, vector_store: {MyApp.PineconeVectorStore, 
+  api_key: System.get_env("PINECONE_API_KEY"),
+  index: "my-index"
+}
+```
+
+### Per-Call Override
+
+```elixir
+# Override for specific operations
+Arcana.ingest("content",
+  repo: MyApp.Repo,
+  vector_store: {:pgvector, repo: MyApp.Repo}
+)
+
+Arcana.search("query",
+  repo: MyApp.Repo,
+  vector_store: {:memory, pid: MyMemoryPid}
+)
+```
+
+## Choosing a Backend
+
+| Backend | Best For | Pros | Cons |
+|---------|----------|------|------|
+| **pgvector** | Production, large datasets | Persistent, scalable, ACID guarantees | Requires PostgreSQL |
+| **memory** | Development, testing, small datasets | Fast, simple setup | Not persistent, limited scale |
+| **Custom** | Cloud-native, managed services | Fully managed, auto-scaling | API costs, vendor lock-in |
+
+## Backend Comparison
+
+### Storage Capacity
+
+| Backend | Recommended Limit | Notes |
+|---------|-------------------|-------|
+| pgvector | 10M+ vectors | Use HNSW index for over 1M vectors |
+| memory | Under 100K vectors | Limited by available RAM |
+| Pinecone | Unlimited | Paid tiers scale automatically |
+
+### Search Performance
+
+<Tabs>
+  <Tab title="pgvector">
+    **Latency:** 10-100ms (depends on index)
+
+    ```elixir
+    # With HNSW index
+    {:ok, results} = Arcana.search("query",
+      repo: MyApp.Repo,
+      limit: 10
+    )
+    # ~20ms for 1M vectors
+    ```
+  </Tab>
+
+  <Tab title="memory">
+    **Latency:** 1-10ms
+
+    ```elixir
+    {:ok, results} = Arcana.search("query",
+      repo: MyApp.Repo,
+      limit: 10
+    )
+    # ~5ms for 100K vectors
+    ```
+  </Tab>
+
+  <Tab title="Custom (Pinecone)">
+    **Latency:** 50-200ms (network + compute)
+
+    ```elixir
+    {:ok, results} = Arcana.search("query",
+      repo: MyApp.Repo,
+      limit: 10
+    )
+    # ~100ms including API call
+    ```
+  </Tab>
+</Tabs>
+
+## Migration Between Backends
+
+Switch from one backend to another:
+
+<Steps>
+  <Step title="Export Embeddings">
+    ```elixir
+    # Export from current backend
+    alias Arcana.{Chunk, Document}
+    
+    chunks = Repo.all(
+      from c in Chunk,
+      join: d in Document,
+      on: c.document_id == d.id,
+      select: %{
+        id: c.id,
+        text: c.text,
+        embedding: c.embedding,
+        metadata: c.metadata,
+        collection: d.collection_id
+      }
+    )
+
+    File.write!("embeddings.json", Jason.encode!(chunks))
+    ```
+  </Step>
+
+  <Step title="Configure New Backend">
+    ```elixir config/config.exs
+    # Switch from pgvector to memory
+    config :arcana, vector_store: :memory
+    ```
+  </Step>
+
+  <Step title="Import Embeddings">
+    ```elixir
+    # Import to new backend
+    {:ok, data} = File.read("embeddings.json")
+    chunks = Jason.decode!(data)
+
+    Enum.each(chunks, fn chunk ->
+      Arcana.VectorStore.store(
+        chunk["collection"],
+        chunk["id"],
+        chunk["embedding"],
+        chunk["metadata"]
+      )
+    end)
+    ```
+  </Step>
+</Steps>
+
+## Testing Vector Stores
+
+```elixir
+defmodule MyApp.VectorStoreTest do
+  use ExUnit.Case
+  alias Arcana.VectorStore
+
+  setup do
+    # Start memory backend for testing
+    {:ok, pid} = VectorStore.Memory.start_link(name: :test_store)
+    {:ok, store: pid}
+  end
+
+  test "stores and retrieves vectors", %{store: store} do
+    embedding = List.duplicate(0.1, 384)
+    metadata = %{text: "test"}
+
+    :ok = VectorStore.store(
+      "test_collection",
+      "test-id",
+      embedding,
+      metadata,
+      vector_store: {:memory, pid: store}
+    )
+
+    results = VectorStore.search(
+      "test_collection",
+      embedding,
+      vector_store: {:memory, pid: store},
+      limit: 1
+    )
+
+    assert length(results) == 1
+    assert hd(results).id == "test-id"
+  end
+end
+```
+
+## Best Practices
+
+1. **Use pgvector for production** - Persistent, reliable, and scalable
+2. **Use memory for tests** - Fast setup/teardown, isolated state
+3. **Create indexes** - Essential for pgvector performance at scale
+4. **Monitor query latency** - Attach telemetry handlers
+5. **Tune threshold** - Filter low-quality results
+6. **Use collections** - Organize vectors by domain/topic
+7. **Batch operations** - Insert/update vectors in batches when possible
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Slow pgvector queries">
+    Create an index:
+
+    ```sql
+    CREATE INDEX ON arcana_chunks 
+    USING hnsw (embedding vector_cosine_ops);
+    ```
+
+    Or increase shared_buffers in postgresql.conf:
+
+    ```
+    shared_buffers = 256MB  # or higher
+    ```
+  </Accordion>
+
+  <Accordion title="Memory backend out of memory">
+    Reduce max_elements or switch to pgvector:
+
+    ```elixir
+    {Arcana.VectorStore.Memory, max_elements: 5_000}
+    ```
+  </Accordion>
+
+  <Accordion title="pgvector extension not found">
+    Install pgvector:
+
+    ```sql
+    CREATE EXTENSION IF NOT EXISTS vector;
+    ```
+
+    Or use pgvector Docker image:
+
+    ```bash
+    docker run -p 5432:5432 pgvector/pgvector:pg16
+    ```
+  </Accordion>
+
+  <Accordion title="Custom backend API errors">
+    Check API credentials and network connectivity:
+
+    ```elixir
+    System.get_env("PINECONE_API_KEY") # Should not be nil
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Embeddings" icon="brain" href="/configuration/embeddings">
+    Configure embedding providers
+  </Card>
+  <Card title="PDF Parsing" icon="file-pdf" href="/configuration/pdf-parsing">
+    Setup PDF document ingestion
+  </Card>
+</CardGroup>

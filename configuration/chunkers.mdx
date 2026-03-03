@@ -1,0 +1,489 @@
+---
+title: Chunker Configuration
+description: Configure text chunking strategies for document ingestion
+---
+
+Arcana splits documents into smaller chunks before embedding. This improves retrieval accuracy by creating focused, semantically coherent segments.
+
+## Quick Start
+
+```elixir
+# config/config.exs
+
+# Default chunker (450 tokens, 50 token overlap)
+config :arcana, chunker: :default
+
+# Custom chunk sizes
+config :arcana, chunker: {:default, chunk_size: 512, chunk_overlap: 100}
+
+# Custom chunker module
+config :arcana, chunker: MyApp.SemanticChunker
+```
+
+## Default Chunker
+
+The default chunker uses the [text_chunker](https://hex.pm/packages/text_chunker) library to split text with overlapping windows.
+
+### Basic Configuration
+
+```elixir
+# config/config.exs
+
+# Use defaults (450 tokens, 50 token overlap)
+config :arcana, chunker: :default
+
+# Customize chunk size and overlap
+config :arcana, chunker: {
+  :default,
+  chunk_size: 512,
+  chunk_overlap: 100
+}
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `:chunk_size` | `450` | Maximum tokens per chunk |
+| `:chunk_overlap` | `50` | Overlapping tokens between chunks |
+| `:format` | `:plaintext` | Text format (`:plaintext`, `:markdown`, `:elixir`) |
+| `:size_unit` | `:tokens` | Measurement unit (`:tokens`, `:characters`) |
+
+### Examples
+
+<Tabs>
+  <Tab title="Token-Based">
+    **Best for most use cases**
+
+    ```elixir
+    config :arcana, chunker: {
+      :default,
+      chunk_size: 450,      # ~300-400 words
+      chunk_overlap: 50,    # ~30-40 words overlap
+      size_unit: :tokens
+    }
+    ```
+
+    Tokens approximate words (1 token ≈ 0.75 words for English).
+  </Tab>
+
+  <Tab title="Character-Based">
+    **For precise byte limits**
+
+    ```elixir
+    config :arcana, chunker: {
+      :default,
+      chunk_size: 2000,     # 2000 characters
+      chunk_overlap: 200,   # 200 character overlap
+      size_unit: :characters
+    }
+    ```
+  </Tab>
+
+  <Tab title="Markdown-Aware">
+    **Respects markdown structure**
+
+    ```elixir
+    config :arcana, chunker: {
+      :default,
+      chunk_size: 512,
+      chunk_overlap: 50,
+      format: :markdown  # Preserves headings and lists
+    }
+    ```
+
+    Markdown format attempts to split at semantic boundaries (headings, paragraphs).
+  </Tab>
+
+  <Tab title="Code-Aware">
+    **For Elixir code**
+
+    ```elixir
+    config :arcana, chunker: {
+      :default,
+      chunk_size: 300,
+      chunk_overlap: 30,
+      format: :elixir  # Respects function boundaries
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Chunk Size Guidelines
+
+Choose chunk size based on your use case:
+
+<CardGroup cols={2}>
+  <Card title="Small Chunks (200-300)" icon="compress">
+    **Best for:**
+    - Precise answers
+    - FAQ-style content
+    - Short definitions
+
+    **Trade-offs:**
+    - May lack context
+    - More chunks to process
+  </Card>
+
+  <Card title="Medium Chunks (400-600)" icon="equals">
+    **Best for:**
+    - General purpose
+    - Articles and blogs
+    - Documentation
+
+    **Trade-offs:**
+    - Good balance of context and precision
+  </Card>
+
+  <Card title="Large Chunks (800-1000)" icon="expand">
+    **Best for:**
+    - Rich context needed
+    - Complex explanations
+    - Long-form content
+
+    **Trade-offs:**
+    - May dilute relevance
+    - Slower embedding
+  </Card>
+
+  <Card title="Custom Strategy" icon="brain">
+    **Best for:**
+    - Domain-specific needs
+    - Semantic boundaries
+    - Multi-document synthesis
+
+    **Trade-offs:**
+    - Requires custom implementation
+  </Card>
+</CardGroup>
+
+## Chunk Overlap
+
+Overlap ensures important information at chunk boundaries isn't lost:
+
+```elixir
+# Example with overlap
+chunk_size: 100, chunk_overlap: 20
+
+# Chunk 1: [word1...word100]
+# Chunk 2:        [word81...word180]  # Last 20 words of Chunk 1 repeated
+# Chunk 3:                  [word161...word260]
+```
+
+**Recommended overlap:** 10-15% of chunk size
+
+<Note>
+  Too much overlap wastes storage and embedding compute. Too little risks losing context at boundaries.
+</Note>
+
+## Custom Chunker
+
+Implement the `Arcana.Chunker` behaviour for custom splitting logic.
+
+### Semantic Chunker Example
+
+```elixir
+defmodule MyApp.SemanticChunker do
+  @behaviour Arcana.Chunker
+
+  @impl true
+  def chunk(text, opts) do
+    # Split on double newlines (paragraph boundaries)
+    text
+    |> String.split(~r/\n\n+/)
+    |> Enum.reject(&blank?/1)
+    |> combine_small_paragraphs(opts)
+    |> Enum.with_index()
+    |> Enum.map(fn {text, index} ->
+      %{
+        text: text,
+        chunk_index: index,
+        token_count: estimate_tokens(text)
+      }
+    end)
+  end
+
+  defp combine_small_paragraphs(paragraphs, opts) do
+    min_size = Keyword.get(opts, :min_chunk_size, 100)
+    
+    paragraphs
+    |> Enum.chunk_while(
+      "",
+      fn para, acc ->
+        combined = if acc == "", do: para, else: acc <> "\n\n" <> para
+        
+        if estimate_tokens(combined) >= min_size do
+          {:cont, combined, ""}
+        else
+          {:cont, combined}
+        end
+      end,
+      fn acc -> {:cont, acc, ""} end
+    )
+    |> Enum.reject(&blank?/1)
+  end
+
+  defp estimate_tokens(text) do
+    # Rough estimate: ~4 chars per token
+    max(1, div(String.length(text), 4))
+  end
+
+  defp blank?(str), do: String.trim(str) == ""
+end
+```
+
+### Configuration
+
+```elixir
+# config/config.exs
+config :arcana, chunker: MyApp.SemanticChunker
+
+# With options
+config :arcana, chunker: {MyApp.SemanticChunker, min_chunk_size: 150}
+```
+
+### Chunk Format
+
+Your chunker must return a list of maps with these required keys:
+
+```elixir
+[
+  %{
+    text: "chunk content",      # Required: the chunk text
+    chunk_index: 0,              # Required: zero-based index
+    token_count: 120             # Required: estimated tokens
+  },
+  # ... more chunks
+]
+```
+
+<Note>
+  You can include additional keys in the chunk map. They'll be stored in the chunk's metadata.
+</Note>
+
+## Function-Based Chunker
+
+For simple cases, provide a function directly:
+
+```elixir
+config :arcana, chunker: fn text, _opts ->
+  # Split on sentences
+  text
+  |> String.split(~r/[.!?]+\s+/)
+  |> Enum.with_index()
+  |> Enum.map(fn {sentence, idx} ->
+    %{
+      text: sentence,
+      chunk_index: idx,
+      token_count: div(String.length(sentence), 4)
+    }
+  end)
+end
+```
+
+## Per-Call Override
+
+Override the global chunker for specific ingestions:
+
+```elixir
+# Use custom chunker for this document
+Arcana.ingest(text,
+  repo: MyApp.Repo,
+  chunker: MyApp.SemanticChunker
+)
+
+# Override with custom options
+Arcana.ingest(text,
+  repo: MyApp.Repo,
+  chunker: {:default, chunk_size: 1000, chunk_overlap: 200}
+)
+
+# Use a function
+Arcana.ingest(text,
+  repo: MyApp.Repo,
+  chunker: fn text, _opts ->
+    # Custom chunking logic
+    [...]
+  end
+)
+```
+
+## Advanced Chunker Patterns
+
+### Markdown-Aware Chunker
+
+Split on headings while respecting chunk size:
+
+```elixir
+defmodule MyApp.MarkdownChunker do
+  @behaviour Arcana.Chunker
+
+  @impl true
+  def chunk(text, opts) do
+    max_size = Keyword.get(opts, :chunk_size, 450)
+    
+    # Split on markdown headings
+    text
+    |> String.split(~r/\n(?=#+\s)/)
+    |> Enum.flat_map(&maybe_split_large_section(&1, max_size))
+    |> Enum.with_index()
+    |> Enum.map(fn {text, idx} ->
+      %{
+        text: String.trim(text),
+        chunk_index: idx,
+        token_count: estimate_tokens(text)
+      }
+    end)
+  end
+
+  defp maybe_split_large_section(section, max_size) do
+    tokens = estimate_tokens(section)
+    
+    if tokens <= max_size do
+      [section]
+    else
+      # Section too large, split by paragraphs
+      section
+      |> String.split(~r/\n\n+/)
+      |> chunk_paragraphs(max_size)
+    end
+  end
+
+  defp chunk_paragraphs(paragraphs, max_size) do
+    # Combine paragraphs until max_size reached
+    # Implementation left as exercise
+    paragraphs
+  end
+
+  defp estimate_tokens(text), do: max(1, div(String.length(text), 4))
+end
+```
+
+### Sliding Window Chunker
+
+Create overlapping chunks with precise control:
+
+```elixir
+defmodule MyApp.SlidingWindowChunker do
+  @behaviour Arcana.Chunker
+
+  @impl true
+  def chunk(text, opts) do
+    window_size = Keyword.get(opts, :chunk_size, 450)
+    stride = Keyword.get(opts, :stride, 400)
+    
+    tokens = tokenize(text)
+    
+    tokens
+    |> Enum.chunk_every(window_size, stride, :discard)
+    |> Enum.with_index()
+    |> Enum.map(fn {chunk_tokens, idx} ->
+      %{
+        text: Enum.join(chunk_tokens, " "),
+        chunk_index: idx,
+        token_count: length(chunk_tokens)
+      }
+    end)
+  end
+
+  defp tokenize(text) do
+    # Simple whitespace tokenization
+    String.split(text, ~r/\s+/)
+  end
+end
+```
+
+## Testing Chunkers
+
+Test your chunker implementation:
+
+```elixir
+defmodule MyApp.SemanticChunkerTest do
+  use ExUnit.Case
+
+  test "chunks text into semantic segments" do
+    text = """
+    First paragraph with some content.
+
+    Second paragraph with more content.
+
+    Third paragraph.
+    """
+
+    chunks = MyApp.SemanticChunker.chunk(text, [])
+
+    assert length(chunks) == 3
+    assert Enum.at(chunks, 0).chunk_index == 0
+    assert Enum.at(chunks, 0).text =~ "First paragraph"
+  end
+
+  test "respects minimum chunk size" do
+    text = "Short.\n\nAlso short.\n\nCombined they're long enough."
+    
+    chunks = MyApp.SemanticChunker.chunk(text, min_chunk_size: 50)
+
+    # Should combine short paragraphs
+    assert length(chunks) < 3
+  end
+end
+```
+
+## Best Practices
+
+1. **Match content type** - Use markdown format for docs, plaintext for articles
+2. **Test with real data** - Chunk sizes that work in theory may not work in practice
+3. **Preserve context** - Use 10-15% overlap to avoid losing information
+4. **Consider embedding model limits** - Most models max out at 512 tokens
+5. **Monitor chunk distribution** - Aim for consistent chunk sizes
+6. **Use semantic boundaries** - Split at paragraphs/sections when possible
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Chunks are too small">
+    Increase `chunk_size` or implement logic to combine small chunks:
+
+    ```elixir
+    config :arcana, chunker: {:default, chunk_size: 600}
+    ```
+  </Accordion>
+
+  <Accordion title="Important info split across chunks">
+    Increase `chunk_overlap`:
+
+    ```elixir
+    config :arcana, chunker: {:default, chunk_overlap: 100}
+    ```
+  </Accordion>
+
+  <Accordion title="Search results lack context">
+    Use larger chunks or implement a custom chunker that respects semantic boundaries:
+
+    ```elixir
+    config :arcana, chunker: {:default, chunk_size: 800}
+    ```
+  </Accordion>
+
+  <Accordion title="Too many chunks generated">
+    Increase chunk size or reduce overlap:
+
+    ```elixir
+    config :arcana, chunker: {
+      :default,
+      chunk_size: 600,
+      chunk_overlap: 30
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Embeddings" icon="brain" href="/configuration/embeddings">
+    Configure embedding providers
+  </Card>
+  <Card title="Vector Stores" icon="database" href="/configuration/vector-stores">
+    Choose a storage backend
+  </Card>
+</CardGroup>

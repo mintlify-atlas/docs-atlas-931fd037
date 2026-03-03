@@ -1,0 +1,175 @@
+---
+title: Agent.gate/2
+description: Decide whether retrieval is needed for the question
+---
+
+## Function Signature
+
+```elixir
+gate(ctx, opts \\ [])
+```
+
+Decides whether retrieval is needed for the question using the LLM.
+
+## Purpose
+
+Uses the LLM to determine if the question can be answered from general knowledge or if it requires searching the knowledge base. Questions about basic facts, math, or general knowledge can skip retrieval.
+
+Sets `skip_retrieval: true` on the context if retrieval can be skipped, which causes `answer/2` to generate a response without context.
+
+## Parameters
+
+<ParamField path="ctx" type="Arcana.Agent.Context" required>
+  The agent context from the pipeline
+</ParamField>
+
+<ParamField path="opts" type="Keyword.t()">
+  Options for the gate step
+</ParamField>
+
+### Options
+
+<ParamField path="prompt" type="function">
+  Custom prompt function `fn question -> prompt_string end`
+  
+  Allows you to customize how the LLM is asked to evaluate retrieval necessity.
+</ParamField>
+
+<ParamField path="llm" type="function">
+  Override the LLM function for this step
+  
+  Takes precedence over the LLM configured in context. Should accept a prompt string and return `{:ok, response}` or `{:error, reason}`.
+</ParamField>
+
+## Context Updates
+
+<ResponseField name="skip_retrieval" type="boolean">
+  Set to `true` if retrieval can be skipped, `false` otherwise
+</ResponseField>
+
+<ResponseField name="gate_reasoning" type="string | nil">
+  The LLM's reasoning for the decision (if provided)
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```elixir
+ctx
+|> Arcana.Agent.gate()      # Decides if retrieval is needed
+|> Arcana.Agent.search()    # Skipped if skip_retrieval is true
+|> Arcana.Agent.answer()    # Uses no-context prompt if skip_retrieval
+```
+
+### With Custom Prompt
+
+```elixir
+ctx
+|> Arcana.Agent.gate(
+  prompt: fn question ->
+    """
+    Is this question domain-specific requiring our knowledge base?
+    Question: #{question}
+    
+    Respond JSON: {"needs_kb": true/false, "reason": "..."}
+    """
+  end
+)
+```
+
+### General Knowledge Question
+
+```elixir
+ctx = Arcana.Agent.new("What is 2 + 2?")
+|> Arcana.Agent.gate()
+
+ctx.skip_retrieval
+# => true
+
+ctx.gate_reasoning
+# => "Basic arithmetic, no knowledge base needed"
+```
+
+### Domain-Specific Question
+
+```elixir
+ctx = Arcana.Agent.new("How does our API authentication work?")
+|> Arcana.Agent.gate()
+
+ctx.skip_retrieval
+# => false
+
+ctx.gate_reasoning
+# => "Requires specific documentation about the API"
+```
+
+## Default Prompt
+
+The default prompt used by the gate:
+
+```elixir
+"""
+Determine if this question requires searching a knowledge base, or if it can be answered from general knowledge.
+
+Question: #{question}
+
+Respond with JSON only:
+{"needs_retrieval": true/false, "reasoning": "brief explanation"}
+
+- Set needs_retrieval to false for: basic facts, math, general knowledge, definitions
+- Set needs_retrieval to true for: domain-specific questions, current events, specific documents
+"""
+```
+
+## Expected LLM Response
+
+The LLM should respond with JSON:
+
+```json
+{
+  "needs_retrieval": false,
+  "reasoning": "This is basic arithmetic that doesn't require a knowledge base"
+}
+```
+
+If parsing fails, defaults to `skip_retrieval: false` (retrieval enabled) as a safe fallback.
+
+## Pipeline Behavior
+
+When `skip_retrieval: true`:
+
+1. **search/2** - Returns empty results immediately
+2. **reason/2** - Skips multi-hop reasoning
+3. **answer/2** - Generates answer without context
+
+## Telemetry Event
+
+Emits `[:arcana, :agent, :gate]` with metadata:
+
+```elixir
+# Start metadata
+%{question: ctx.question}
+
+# Stop metadata
+%{skip_retrieval: true | false}
+```
+
+## When to Use
+
+Use `gate/2` when:
+
+- Your system receives a mix of general and domain-specific questions
+- You want to reduce unnecessary retrieval costs
+- Questions like "What is 2+2?" or "Define recursion" don't need your knowledge base
+
+## Performance Considerations
+
+- Adds one LLM call to the pipeline
+- Can save retrieval costs for general knowledge questions
+- Most effective when ~30%+ of questions are general knowledge
+
+## See Also
+
+- [answer/2](/api-reference/agent/answer) - Handles both with-context and no-context generation
+- [search/2](/api-reference/agent/search) - Respects skip_retrieval flag

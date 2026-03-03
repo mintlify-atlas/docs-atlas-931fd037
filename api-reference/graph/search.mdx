@@ -1,0 +1,466 @@
+---
+title: Graph Search
+description: Searching knowledge graphs with RRF fusion and graph traversal
+---
+
+## Overview
+
+Graph search in GraphRAG combines **vector similarity** and **graph traversal** to retrieve more relevant context than traditional RAG. The core technique is **Reciprocal Rank Fusion (RRF)** - a method for merging ranked lists from multiple sources.
+
+## How Graph Search Works
+
+### Complete Pipeline
+
+```elixir
+# 1. User asks a question
+query = "Tell me about OpenAI's relationship with Microsoft"
+
+# 2. Extract entities from query
+{:ok, query_entities} = Arcana.Graph.EntityExtractor.NER.extract(query, [])
+# => [%{name: "OpenAI", type: "organization"}, 
+#     %{name: "Microsoft", type: "organization"}]
+
+# 3. Run vector search (standard RAG)
+vector_results = Arcana.search(query, repo: MyApp.Repo, collection: "docs", top_k: 10)
+# => [chunk1, chunk2, chunk3, ...]  (ranked by cosine similarity)
+
+# 4. Run graph search (GraphRAG)
+graph_results = Arcana.Graph.search(graph, query_entities, depth: 2)
+# => [chunk4, chunk2, chunk5, ...]  (ranked by graph traversal)
+
+# 5. Combine with RRF fusion
+final_results = Arcana.Graph.fusion_search(
+  graph, 
+  query_entities, 
+  vector_results,
+  depth: 2,
+  limit: 10,
+  k: 60
+)
+# => [chunk2, chunk1, chunk4, ...]  (RRF-fused ranking)
+```
+
+See implementation in `lib/arcana/graph/fusion_search.ex:129`
+
+## Graph Search (Without Vector)
+
+Pure graph-based retrieval without vector search:
+
+```elixir
+# Find entities in graph matching query entities
+query_entities = [
+  %{name: "OpenAI", type: "organization"},
+  %{name: "GPT-4", type: "technology"}
+]
+
+results = Arcana.Graph.search(graph, query_entities, depth: 2)
+```
+
+### How it works:
+
+1. **Find matching entities** in the graph by name
+2. **Traverse relationships** up to `depth` hops
+3. **Collect chunks** connected to discovered entities
+4. **Return unique chunks** containing relevant entities
+
+See `lib/arcana/graph/fusion_search.ex:100`
+
+### Example: 2-hop traversal
+
+```
+Query entity: "OpenAI"
+
+Depth 0: [OpenAI]
+          |
+Depth 1: [Sam Altman, GPT-4, Microsoft]  (direct relationships)
+          |
+Depth 2: [Y Combinator, Azure, ChatGPT]  (2nd-degree relationships)
+
+Retrieve all chunks mentioning any of these entities
+```
+
+## Fusion Search (Vector + Graph)
+
+Combines vector search and graph search using RRF:
+
+```elixir
+results = Arcana.Graph.fusion_search(
+  graph,
+  query_entities,
+  vector_results,
+  depth: 1,    # Graph traversal depth
+  limit: 10,   # Maximum results
+  k: 60        # RRF constant
+)
+```
+
+See `lib/arcana/graph/fusion_search.ex:142`
+
+### Options
+
+**`:depth`** (integer, default: 1)
+- How many relationship hops to traverse
+- Higher depth = more entities, broader context
+- Typical range: 1-3
+
+**`:limit`** (integer, default: 10)
+- Maximum number of results to return
+- Final results after RRF fusion
+
+**`:k`** (integer, default: 60)
+- RRF constant to reduce high-rank impact
+- Higher k = more balanced fusion
+- Lower k = favor top-ranked items
+- Typical range: 10-100
+
+## Reciprocal Rank Fusion (RRF)
+
+### What is RRF?
+
+RRF is a **rank aggregation** method that combines multiple ranked lists into a single ranking.
+
+**Formula:**
+```
+score(document) = Σ 1 / (k + rank(document, list_i))
+```
+
+Where:
+- `k` is a constant (default: 60)
+- `rank(document, list_i)` is the position in list i (1-based)
+- Sum across all lists containing the document
+
+### Example Calculation
+
+```elixir
+# Vector search results
+vector_results = [chunk_A, chunk_B, chunk_C]
+
+# Graph search results  
+graph_results = [chunk_B, chunk_D, chunk_A]
+
+# RRF scores (k=60):
+chunk_A: 1/(60+1) + 1/(60+3) = 0.0164 + 0.0159 = 0.0323
+chunk_B: 1/(60+2) + 1/(60+1) = 0.0161 + 0.0164 = 0.0325  ← Highest
+chunk_C: 1/(60+3) + 0        = 0.0159
+chunk_D: 0        + 1/(60+2) = 0.0161
+
+# Final ranking: [chunk_B, chunk_A, chunk_D, chunk_C]
+```
+
+See implementation in `lib/arcana/graph/fusion_search.ex:42`
+
+### Why RRF Works
+
+✅ **Promotes agreement** - Documents in multiple lists score higher
+
+✅ **Robust to outliers** - Bad ranking in one list doesn't eliminate a document
+
+✅ **No score normalization** - Works with any ranking method (no need to normalize scores)
+
+✅ **Simple & effective** - Beats weighted averaging in most benchmarks
+
+## Graph Traversal
+
+Find related entities by following relationships:
+
+```elixir
+# Start from a specific entity
+entity_id = "entity_123"
+
+# Traverse up to 2 hops
+related = Arcana.Graph.traverse(graph, entity_id, depth: 2)
+
+# Returns all reachable entities (excluding start entity)
+```
+
+See `lib/arcana/graph/graph_query.ex:130`
+
+### Traversal Algorithm
+
+```elixir
+# Breadth-first search
+
+Depth 0: visited = {start_entity}
+         frontier = {start_entity}
+
+Depth 1: neighbors = adjacency[start_entity]
+         new_neighbors = neighbors - visited
+         visited = visited ∪ new_neighbors
+         frontier = new_neighbors
+
+Depth 2: neighbors = ⋃ adjacency[n] for n in frontier
+         new_neighbors = neighbors - visited
+         visited = visited ∪ new_neighbors
+         frontier = new_neighbors
+
+Return: visited - {start_entity}
+```
+
+See `lib/arcana/graph/graph_query.ex:193`
+
+## Finding Entities
+
+### By Name
+
+```elixir
+# Exact match (case-insensitive)
+entities = Arcana.Graph.find_entities(graph, "OpenAI", fuzzy: false)
+# => [%{id: "e1", name: "OpenAI", type: "organization"}]
+
+# Fuzzy match (substring)
+entities = Arcana.Graph.find_entities(graph, "Open", fuzzy: true)
+# => [%{name: "OpenAI", ...}, %{name: "Open Source Initiative", ...}]
+```
+
+See `lib/arcana/graph/graph_query.ex:76`
+
+### By Embedding
+
+Find entities similar to a query embedding:
+
+```elixir
+{:ok, embedding} = Arcana.Embedder.embed("artificial intelligence")
+
+entities = Arcana.Graph.GraphQuery.find_entities_by_embedding(
+  graph,
+  embedding,
+  top_k: 5,
+  min_similarity: 0.7
+)
+# => [%{name: "Machine Learning", ...}, %{name: "Neural Networks", ...}]
+```
+
+See `lib/arcana/graph/graph_query.ex:102`
+
+## Getting Chunks for Entities
+
+Retrieve all chunks mentioning specific entities:
+
+```elixir
+entity_ids = ["entity_1", "entity_2", "entity_3"]
+
+chunks = Arcana.Graph.GraphQuery.get_chunks_for_entities(graph, entity_ids)
+# => [chunk1, chunk2, chunk5, ...]  (unique chunks)
+```
+
+See `lib/arcana/graph/graph_query.ex:144`
+
+## Real Examples from Source
+
+### Example 1: RRF Implementation
+
+From `lib/arcana/graph/fusion_search.ex:57`:
+
+```elixir
+def reciprocal_rank_fusion(lists, opts \\ []) do
+  k = Keyword.get(opts, :k, 60)
+
+  # Calculate RRF scores for all documents
+  scores =
+    lists
+    |> Enum.reduce(%{}, fn list, acc ->
+      accumulate_rrf_scores(list, k, acc)
+    end)
+
+  # Sort by score descending
+  scores
+  |> Map.values()
+  |> Enum.sort_by(fn {_item, score} -> score end, :desc)
+  |> Enum.map(fn {item, _score} -> item end)
+end
+
+defp accumulate_rrf_scores(list, k, acc) do
+  list
+  |> Enum.with_index(1)  # 1-based ranking
+  |> Enum.reduce(acc, fn {item, rank}, inner_acc ->
+    score = 1.0 / (k + rank)
+    update_item_score(inner_acc, item, score)
+  end)
+end
+
+defp update_item_score(scores, item, score) do
+  Map.update(scores, item.id, {item, score}, fn {existing_item, existing_score} ->
+    {existing_item, existing_score + score}  # Accumulate scores
+  end)
+end
+```
+
+### Example 2: Graph Search
+
+From `lib/arcana/graph/fusion_search.ex:100`:
+
+```elixir
+def graph_search(graph, entities, opts \\ []) do
+  depth = Keyword.get(opts, :depth, 1)
+
+  # 1. Find entities in graph matching extracted entities
+  entity_ids =
+    entities
+    |> Enum.flat_map(fn extracted ->
+      matches = GraphQuery.find_entities_by_name(graph, extracted.name, fuzzy: false)
+      Enum.map(matches, & &1.id)
+    end)
+    |> Enum.uniq()
+
+  if entity_ids == [] do
+    []
+  else
+    # 2. Traverse to find related entities
+    related_ids =
+      entity_ids
+      |> Enum.flat_map(fn id ->
+        related = GraphQuery.traverse(graph, id, depth: depth)
+        [id | Enum.map(related, & &1.id)]  # Include original entity
+      end)
+      |> Enum.uniq()
+
+    # 3. Get chunks connected to all related entities
+    GraphQuery.get_chunks_for_entities(graph, related_ids)
+  end
+end
+```
+
+### Example 3: Fusion Search
+
+From `lib/arcana/graph/fusion_search.ex:142`:
+
+```elixir
+def search(graph, entities, vector_results, opts \\ []) do
+  limit = Keyword.get(opts, :limit, 10)
+  depth = Keyword.get(opts, :depth, 1)
+  k = Keyword.get(opts, :k, 60)
+
+  # Run graph search
+  graph_results = graph_search(graph, entities, depth: depth)
+
+  # Merge using RRF
+  reciprocal_rank_fusion([vector_results, graph_results], k: k)
+  |> Enum.take(limit)
+end
+```
+
+### Example 4: BFS Traversal
+
+From `lib/arcana/graph/graph_query.ex:193`:
+
+```elixir
+defp do_traverse(_graph, visited, _frontier, 0), do: visited
+
+defp do_traverse(graph, visited, frontier, depth) do
+  # Get neighbors of all nodes in frontier
+  new_neighbors =
+    frontier
+    |> Enum.flat_map(fn id -> Map.get(graph.adjacency, id, []) end)
+    |> MapSet.new()
+    |> MapSet.difference(visited)  # Remove already visited
+
+  if MapSet.size(new_neighbors) == 0 do
+    visited  # No more neighbors, stop
+  else
+    new_visited = MapSet.union(visited, new_neighbors)
+    do_traverse(graph, new_visited, new_neighbors, depth - 1)
+  end
+end
+```
+
+## Integration with Arcana
+
+GraphRAG integrates seamlessly with standard Arcana operations:
+
+```elixir
+# During ingest (build graph)
+Arcana.ingest(text,
+  repo: MyApp.Repo,
+  collection: "docs",
+  graph: true  # Enable GraphRAG
+)
+
+# During search (use graph)
+defmodule MyApp.Search do
+  def search_with_graph(query, opts) do
+    # 1. Vector search
+    {:ok, vector_results} = Arcana.search(query, opts)
+    
+    # 2. Load graph from database
+    graph = load_graph_from_db(opts[:collection])
+    
+    # 3. Extract query entities
+    {:ok, entities} = Arcana.Graph.EntityExtractor.NER.extract(query, [])
+    
+    # 4. Fusion search
+    if length(entities) > 0 do
+      Arcana.Graph.fusion_search(graph, entities, vector_results,
+        depth: 2,
+        limit: 10
+      )
+    else
+      vector_results  # Fall back to vector-only
+    end
+  end
+  
+  defp load_graph_from_db(collection) do
+    # Load entities, relationships, chunks from database
+    # Build graph structure
+  end
+end
+```
+
+## Performance Considerations
+
+**Graph Search:**
+- Small graphs (< 100 entities): ~1-10ms
+- Medium graphs (100-1000 entities): ~10-100ms
+- Large graphs (1000-10000 entities): ~100-1000ms
+- Depth impact: O(depth × avg_degree)
+
+**RRF Fusion:**
+- Very fast: O(n log n) where n = total unique documents
+- Typical: ~1-5ms for 20-100 documents
+
+**Optimization Tips:**
+1. **Cache graph structure** - Build once, query many times
+2. **Index adjacency lists** - Use maps for O(1) neighbor lookup
+3. **Limit depth** - Depth 1-2 is usually sufficient
+4. **Early termination** - Stop traversal when enough chunks found
+5. **Parallel execution** - Run vector and graph search concurrently
+
+## When to Use Graph Search
+
+### Best Use Cases
+
+✅ **Multi-hop questions**
+- "Who works at companies funded by Y Combinator?"
+- Requires traversing: Person → Company → Investor
+
+✅ **Entity-centric queries**
+- "Everything about Sam Altman"
+- Traverse all relationships from one entity
+
+✅ **Relationship exploration**
+- "How is OpenAI connected to Microsoft?"
+- Find shortest path between entities
+
+✅ **Domain with rich entities**
+- Technical docs with many named components
+- Research papers with authors, institutions, citations
+
+### When Vector-Only is Better
+
+❌ **Abstract/semantic queries**
+- "What are best practices for caching?"
+- No specific entities to anchor on
+
+❌ **Few entities in query**
+- "How do I configure logging?"
+- No entities extracted, graph search returns nothing
+
+❌ **Unstructured content**
+- Creative writing, narratives
+- Few named entities or relationships
+
+## Next Steps
+
+- [Entity Extraction](/api-reference/graph/entities) - Configure entity extractors
+- [Relationships](/api-reference/graph/relationships) - Build the graph structure
+- [Communities](/api-reference/graph/communities) - Use community summaries for global queries
+- [GraphRAG Overview](/api-reference/graph/overview) - Understand the complete pipeline

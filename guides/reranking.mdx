@@ -1,0 +1,239 @@
+---
+title: Re-ranking
+description: Improve retrieval quality by re-scoring and filtering search results with LLM-based or neural rerankers
+---
+
+Re-ranking is a second-stage retrieval step that scores each chunk based on relevance to the question, filters by a threshold, and re-sorts by score. This improves answer quality by ensuring only the most relevant context reaches the LLM.
+
+## Using Re-ranking in the Agent Pipeline
+
+```elixir
+alias Arcana.Agent
+
+llm = fn prompt -> {:ok, LangChain.chat(prompt)} end
+
+ctx =
+  Agent.new("What is Elixir?", repo: MyApp.Repo, llm: llm)
+  |> Agent.search()
+  |> Agent.rerank()      # Re-rank before answering
+  |> Agent.answer()
+
+ctx.answer
+```
+
+## Configuration
+
+### Threshold
+
+The threshold (0-10) filters out low-relevance chunks:
+
+<CodeGroup>
+
+```elixir High Threshold
+# Keep only highly relevant chunks (score >= 8)
+Agent.rerank(ctx, threshold: 8)
+```
+
+```elixir Permissive Threshold
+# More permissive (score >= 5)
+Agent.rerank(ctx, threshold: 5)
+```
+
+```elixir Default
+# Default threshold is 7
+Agent.rerank(ctx)
+```
+
+</CodeGroup>
+
+### Custom Prompt
+
+Customize how the LLM scores relevance:
+
+```elixir
+custom_prompt = fn question, chunk_text ->
+  """
+  Rate how relevant this text is for answering the question.
+
+  Question: #{question}
+  Text: #{chunk_text}
+
+  Score 0-10 where 10 is perfectly relevant.
+  Return JSON: {"score": <number>, "reasoning": "<brief explanation>"}
+  """
+end
+
+Agent.rerank(ctx, prompt: custom_prompt)
+```
+
+## Built-in Rerankers
+
+### Arcana.Agent.Reranker.LLM (Default)
+
+Uses your LLM to score each chunk:
+
+<Steps>
+  <Step title="Prompt LLM">
+    Prompts the LLM with question + chunk text
+  </Step>
+  <Step title="Parse Score">
+    Parses a 0-10 score from the response
+  </Step>
+  <Step title="Filter">
+    Filters chunks below threshold
+  </Step>
+  <Step title="Sort">
+    Sorts by score descending
+  </Step>
+</Steps>
+
+This is the default when you call `Arcana.Agent.rerank/2`.
+
+### Arcana.Agent.Reranker.ColBERT
+
+ColBERT-style neural reranking using per-token embeddings and MaxSim scoring. Provides more nuanced relevance scoring than single-vector methods by matching individual query tokens to document tokens.
+
+Add the optional dependency:
+
+```elixir mix.exs
+{:stephen, "~> 0.1"}
+```
+
+Use it:
+
+<CodeGroup>
+
+```elixir Basic
+Agent.rerank(ctx, reranker: Arcana.Agent.Reranker.ColBERT)
+```
+
+```elixir With Options
+Agent.rerank(ctx, reranker: {Arcana.Agent.Reranker.ColBERT, top_k: 5})
+```
+
+</CodeGroup>
+
+**Options:**
+
+- `:encoder` - Pre-loaded Stephen encoder (loads default on first use if not provided)
+- `:threshold` - Minimum score to keep (default: 0.0)
+- `:top_k` - Maximum results to return
+
+**When to use ColBERT:**
+
+- When you need high-quality reranking without LLM latency/cost
+- When semantic nuance matters (e.g., technical documentation)
+- When you want deterministic, reproducible scores
+
+**Trade-offs vs LLM reranker:**
+
+| Aspect | ColBERT | LLM |
+|--------|---------|-----|
+| Latency | Fast (local inference) | Slow (API call per chunk) |
+| Cost | Free after model load | Per-token API cost |
+| Quality | Excellent for semantic similarity | Can understand complex relevance |
+| Customization | Fixed model behavior | Custom prompts |
+
+## Custom Rerankers
+
+### Implementing the Behaviour
+
+Create a custom reranker by implementing `Arcana.Agent.Reranker`:
+
+```elixir
+defmodule MyApp.CrossEncoderReranker do
+  @behaviour Arcana.Agent.Reranker
+
+  @impl Arcana.Agent.Reranker
+  def rerank(question, chunks, opts) do
+    threshold = Keyword.get(opts, :threshold, 0.5)
+
+    scored_chunks =
+      chunks
+      |> Enum.map(fn chunk ->
+        score = cross_encoder_score(question, chunk.text)
+        {chunk, score}
+      end)
+      |> Enum.filter(fn {_chunk, score} -> score >= threshold end)
+      |> Enum.sort_by(fn {_chunk, score} -> score end, :desc)
+      |> Enum.map(fn {chunk, _score} -> chunk end)
+
+    {:ok, scored_chunks}
+  end
+
+  defp cross_encoder_score(question, text) do
+    # Call your cross-encoder model
+    Nx.Serving.batched_run(MyApp.CrossEncoder, {question, text})
+  end
+end
+```
+
+Use it:
+
+```elixir
+Agent.rerank(ctx, reranker: MyApp.CrossEncoderReranker)
+```
+
+### Inline Function
+
+For simple cases, pass a function directly:
+
+```elixir
+Agent.rerank(ctx, reranker: fn question, chunks, _opts ->
+  # Your custom logic
+  filtered = Enum.filter(chunks, &relevant?(&1, question))
+  {:ok, filtered}
+end)
+```
+
+## When to Use Re-ranking
+
+<Accordion title="When re-ranking helps">
+  Re-ranking is most valuable when:
+  
+  - Your initial search returns many marginally relevant results
+  - Answer quality suffers from irrelevant context
+  - You have compute budget for the extra LLM calls (one per chunk)
+</Accordion>
+
+<Accordion title="When to skip re-ranking">
+  Skip re-ranking when:
+  
+  - Search already returns highly relevant results
+  - Latency is critical (adds one LLM call per chunk)
+  - You're using a very small result set (limit: 3 or less)
+</Accordion>
+
+## Telemetry
+
+Re-ranking emits telemetry events:
+
+```elixir
+:telemetry.attach(
+  "rerank-logger",
+  [:arcana, :agent, :rerank, :stop],
+  fn _event, measurements, metadata, _config ->
+    IO.puts("Reranked: #{metadata.chunks_before} -> #{metadata.chunks_after} chunks")
+  end,
+  nil
+)
+```
+
+See the [Telemetry Guide](/guides/telemetry) for complete event documentation.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Agentic RAG" icon="robot" href="/guides/agentic-rag">
+    Build sophisticated pipelines with re-ranking
+  </Card>
+  <Card title="Evaluation" icon="chart-line" href="/guides/evaluation">
+    Measure how re-ranking improves retrieval quality
+  </Card>
+  <Card title="Search Algorithms" icon="magnifying-glass" href="/guides/search-algorithms">
+    Understand the initial retrieval stage
+  </Card>
+  <Card title="Telemetry" icon="chart-mixed" href="/guides/telemetry">
+    Monitor re-ranking performance
+  </Card>
+</CardGroup>
