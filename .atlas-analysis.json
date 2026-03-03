@@ -1,0 +1,140 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Arcana",
+  "projectDescription": "Embeddable RAG library for Elixir/Phoenix with agentic pipelines and dashboard",
+  "theme": "aspen",
+  "primaryColor": "#8B5CF6",
+  "lightColor": "#A78BFA",
+  "darkColor": "#7C3AED",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "core-concepts/rag-pipeline",
+              "core-concepts/embeddings",
+              "core-concepts/search-modes",
+              "core-concepts/chunking"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/basic-usage",
+              "guides/agentic-rag",
+              "guides/graphrag",
+              "guides/llm-integration",
+              "guides/search-algorithms",
+              "guides/reranking",
+              "guides/evaluation",
+              "guides/dashboard",
+              "guides/telemetry"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/embeddings",
+              "configuration/chunkers",
+              "configuration/vector-stores",
+              "configuration/pdf-parsing",
+              "configuration/llm"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api-reference/arcana",
+              "api-reference/ingest",
+              "api-reference/search",
+              "api-reference/ask"
+            ]
+          },
+          {
+            "group": "Agent Pipeline",
+            "pages": [
+              "api-reference/agent/overview",
+              "api-reference/agent/gate",
+              "api-reference/agent/rewrite",
+              "api-reference/agent/select",
+              "api-reference/agent/expand",
+              "api-reference/agent/decompose",
+              "api-reference/agent/search",
+              "api-reference/agent/reason",
+              "api-reference/agent/rerank",
+              "api-reference/agent/answer"
+            ]
+          },
+          {
+            "group": "GraphRAG",
+            "pages": [
+              "api-reference/graph/overview",
+              "api-reference/graph/entities",
+              "api-reference/graph/relationships",
+              "api-reference/graph/communities",
+              "api-reference/graph/search"
+            ]
+          },
+          {
+            "group": "Extensibility",
+            "pages": [
+              "api-reference/behaviours/embedder",
+              "api-reference/behaviours/chunker",
+              "api-reference/behaviours/vector-store",
+              "api-reference/behaviours/agent-components"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Simple API with ingest/search/ask functions",
+    "Agentic RAG pipeline with query expansion and self-correction",
+    "GraphRAG with entity extraction and community detection",
+    "Hybrid search combining vector and full-text",
+    "Pluggable embeddings (Bumblebee, OpenAI, custom)",
+    "Multiple vector store backends (pgvector, HNSWLib)",
+    "LiveView dashboard for document management",
+    "Built-in evaluation metrics (MRR, Recall, Precision)",
+    "Comprehensive telemetry and observability"
+  ],
+  "publicApiSurface": [
+    "Arcana.ingest/2",
+    "Arcana.ingest_file/2",
+    "Arcana.search/2",
+    "Arcana.ask/2",
+    "Arcana.delete/2",
+    "Arcana.Agent.new/2",
+    "Arcana.Agent.gate/2",
+    "Arcana.Agent.rewrite/2",
+    "Arcana.Agent.select/2",
+    "Arcana.Agent.expand/2",
+    "Arcana.Agent.decompose/2",
+    "Arcana.Agent.search/2",
+    "Arcana.Agent.reason/2",
+    "Arcana.Agent.rerank/2",
+    "Arcana.Agent.answer/2",
+    "Arcana.Graph.build_and_persist/4",
+    "Arcana.Evaluation.evaluate/3",
+    "Arcana.Embedder behaviour",
+    "Arcana.Chunker behaviour",
+    "Arcana.VectorStore behaviour"
+  ]
+}
